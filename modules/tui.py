@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+
+from openai import OpenAI
+from dotenv import load_dotenv
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.message import Message
+from textual.widgets import DataTable, Footer, Header, Label, Static
+from textual.containers import Horizontal, Vertical
+
+from modules.artnet_renderer import ArtNetRenderer
+from modules.bpm import BpmClock
+from modules.effects import effect_from_dict
+from modules.recorder import record_until_release, transcribe
+
+load_dotenv()
+
+ARTNET_IP = os.environ.get("ARTNET_IP", "192.168.178.102")
+LED_COUNT = int(os.environ.get("LED_COUNT", "100"))
+SYSTEM_PROMPT = open("system_prompt.txt").read().strip()
+
+# ── State colours ──────────────────────────────────────────────────────────────
+STATE_STYLES: dict[str, str] = {
+    "WAITING":      "dim white",
+    "RECORDING":    "bold red",
+    "TRANSCRIBING": "bold yellow",
+    "THINKING":     "bold cyan",
+    "LIVE":         "bold green",
+}
+
+EFFECT_COLORS: dict[str, str] = {
+    "solid":       "white",
+    "color_wave":  "cyan",
+    "pulse":       "magenta",
+    "rainbow":     "yellow",
+    "chase":       "green",
+    "meteor":      "bright_white",
+    "twinkle":     "bright_cyan",
+    "fire":        "red",
+    "plasma":      "bright_magenta",
+    "larson":      "bright_red",
+    "beat_flash":  "bright_yellow",
+}
+
+
+# ── Messages ───────────────────────────────────────────────────────────────────
+class StatusChanged(Message):
+    def __init__(self, state: str) -> None:
+        super().__init__()
+        self.state = state
+
+
+class EffectActivated(Message):
+    def __init__(self, prompt: str, cmd: dict) -> None:
+        super().__init__()
+        self.prompt = prompt
+        self.cmd = cmd
+
+
+class BpmChanged(Message):
+    def __init__(self, bpm: float) -> None:
+        super().__init__()
+        self.bpm = bpm
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def _fmt_params(params: dict) -> str:
+    return "  ".join(f"{k}={v}" for k, v in params.items())
+
+
+def _fmt_effect_label(cmd: dict) -> str:
+    name = cmd.get("effect", "?")
+    params = cmd.get("params", {})
+    filters = cmd.get("filters", [])
+    color = EFFECT_COLORS.get(name, "white")
+    p_str = _fmt_params(params) if params else "—"
+    f_str = ""
+    if filters:
+        f_str = "  [dim italic]+" + "+".join(f["type"] for f in filters) + "[/]"
+    return f"[bold {color}]{name}[/]  [dim]{p_str}[/]{f_str}"
+
+
+# ── TUI App ────────────────────────────────────────────────────────────────────
+class VJApp(App):
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+
+    #body {
+        layout: horizontal;
+        height: 1fr;
+    }
+
+    #left {
+        width: 2fr;
+        border: solid $primary-darken-2;
+        padding: 0 1;
+    }
+
+    #right {
+        width: 1fr;
+        border: solid $primary-darken-2;
+        padding: 1 2;
+    }
+
+    .section-title {
+        color: $text-muted;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #status {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #effect-label {
+        margin-top: 1;
+    }
+
+    #bpm-label {
+        margin-top: 1;
+        color: $accent;
+    }
+
+    DataTable {
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit", priority=True),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal(id="body"):
+            with Vertical(id="left"):
+                yield Label("Command History", classes="section-title")
+                yield DataTable(id="history")
+            with Vertical(id="right"):
+                yield Label("Status", classes="section-title")
+                yield Label("WAITING", id="status")
+                yield Static("[dim]No effect yet[/]", id="effect-label")
+                yield Static("[dim]BPM: —[/]", id="bpm-label")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#history", DataTable)
+        table.add_columns("Prompt", "Effect", "Params")
+        table.cursor_type = "row"
+
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        renderer = ArtNetRenderer(ARTNET_IP, LED_COUNT)
+        self._bpm_clock = BpmClock()
+        self._bpm_clock.start()
+
+        self.run_worker(self._ptt_loop(renderer, client), exclusive=False)
+        self.run_worker(renderer.render_loop(), exclusive=False)
+
+    async def _ptt_loop(self, renderer: ArtNetRenderer, client: OpenAI) -> None:
+        history: list[dict] = []
+
+        while True:
+            self.post_message(StatusChanged("WAITING"))
+            audio = await asyncio.to_thread(record_until_release)
+
+            self.post_message(StatusChanged("TRANSCRIBING"))
+            text = await asyncio.to_thread(transcribe, audio, client)
+
+            self.post_message(StatusChanged("THINKING"))
+            cmd, history = await asyncio.to_thread(_chat_to_effect, text, history, client)
+
+            if cmd.get("bpm") is not None:
+                bpm = float(cmd["bpm"])
+                self._bpm_clock.set_bpm(bpm)
+                self.post_message(BpmChanged(bpm))
+
+            effect = effect_from_dict(cmd)
+            self._bpm_clock.attach_effect(effect)
+            renderer.set_effect(effect)
+            self.post_message(StatusChanged("LIVE"))
+            self.post_message(EffectActivated(text, cmd))
+
+    # ── Message handlers ───────────────────────────────────────────────────────
+    def on_status_changed(self, msg: StatusChanged) -> None:
+        label = self.query_one("#status", Label)
+        style = STATE_STYLES.get(msg.state, "white")
+        label.update(f"[{style}]{msg.state}[/]")
+
+    def on_effect_activated(self, msg: EffectActivated) -> None:
+        table = self.query_one("#history", DataTable)
+        effect_name = msg.cmd.get("effect", "?")
+        params_str = _fmt_params(msg.cmd.get("params", {}))
+        filters = msg.cmd.get("filters", [])
+        if filters:
+            params_str += "  [dim][" + "+".join(f["type"] for f in filters) + "][/]"
+        table.add_row(msg.prompt, effect_name, params_str)
+        table.move_cursor(row=table.row_count - 1)
+        self.query_one("#effect-label", Static).update(_fmt_effect_label(msg.cmd))
+
+    def on_bpm_changed(self, msg: BpmChanged) -> None:
+        self.query_one("#bpm-label", Static).update(f"[bold]BPM: {msg.bpm:.1f}[/]")
+
+
+# ── GPT helper (runs in thread) ────────────────────────────────────────────────
+def _chat_to_effect(text: str, history: list[dict], client: OpenAI) -> tuple[dict, list[dict]]:
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": text}]
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        response_format={"type": "json_object"},
+    )
+    raw = response.choices[0].message.content
+    new_history = history + [
+        {"role": "user", "content": text},
+        {"role": "assistant", "content": raw},
+    ]
+    return json.loads(raw), new_history
