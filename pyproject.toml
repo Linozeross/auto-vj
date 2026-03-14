@@ -1,7 +1,18 @@
 [project]
 name = "auto-vj"
 version = "0.1.0"
-description = "Add your description here"
+description = "Push-to-talk voice assistant powered by OpenAI"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "openai>=1.0",
+    "sounddevice",
+    "numpy",
+    "pynput",
+    "python-dotenv",
+    "pyartnet>=2.0",
+    "pydantic>=2.12.5",
+]
+
+[project.scripts]
+auto-vj = "main:main"
