@@ -46,11 +46,11 @@ import numpy as np
 import sounddevice as sd
 
 from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
-from modules.audio_level import AudioLevel
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
-from modules.effects import effect_from_dict, set_audio_level_source
+from modules.effects import VJResponse
 from modules.recorder import SAMPLE_RATE, CHANNELS, transcribe
+from modules.sequences import Sequence, sequence_from_dict, sequence_from_effect_cmd, PHRASE_BEATS
 
 load_dotenv()
 
@@ -87,11 +87,17 @@ STATE_COLORS: dict[str, str] = {
 }
 
 EFFECT_COLORS: dict[str, str] = {
-    "solid": "#cccccc", "color_wave": "#00d4d4", "pulse": "#cc44cc",
-    "rainbow": "#d4c040", "chase": "#40c860", "meteor": "#e0e0e0",
-    "twinkle": "#60e0e0", "fire": "#e04020", "plasma": "#d060e0",
-    "larson": "#e04040", "beat_flash": "#e0c040", "palette_wave": "#e08020",
-    "beat_pulse": "#d09000", "audio_pulse": "#e02080", "audio_wave": "#a040e0",
+    "solid":        "#cccccc",
+    "color_wave":   "#00d4d4",
+    "pulse":        "#cc44cc",
+    "rainbow":      "#d4c040",
+    "chase":        "#40c860",
+    "meteor":       "#e0e0e0",
+    "twinkle":      "#60e0e0",
+    "plasma":       "#d060e0",
+    "larson":       "#e04040",
+    "palette_wave": "#e08020",
+    "beat_pulse":   "#d09000",
 }
 
 # Qt QSS accepts only a single font-family value (no comma fallback lists).
@@ -180,7 +186,7 @@ def _record_gui(stop_event: threading.Event,
     return np.concatenate(frames, axis=0)
 
 
-def _chat_to_effect(text: str, history: list[dict], client: OpenAI) -> tuple[dict, list[dict]]:
+def _chat_to_response(text: str, history: list[dict], client: OpenAI) -> tuple[VJResponse, list[dict]]:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": text}]
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -192,7 +198,8 @@ def _chat_to_effect(text: str, history: list[dict], client: OpenAI) -> tuple[dic
         {"role": "user", "content": text},
         {"role": "assistant", "content": raw},
     ]
-    return json.loads(raw), new_history
+    vj_response = VJResponse.model_validate(json.loads(raw))
+    return vj_response, new_history
 
 
 # ── Presets persistence ────────────────────────────────────────────────────────
@@ -202,7 +209,6 @@ def load_presets() -> list[dict | None]:
         try:
             data = json.loads(PRESETS_FILE.read_text())
             slots = data if isinstance(data, list) else []
-            # Pad / trim to NUM_PRESETS
             slots = (slots + [None] * NUM_PRESETS)[:NUM_PRESETS]
             return slots
         except Exception:
@@ -222,7 +228,8 @@ class VJWorker(QThread):
     bpm_changed         = pyqtSignal(float)
     link_status_changed = pyqtSignal(float, int)    # (tempo, peers)
     bpm_mode_changed    = pyqtSignal(str)
-    worker_error        = pyqtSignal(str)           # fatal error message
+    queue_status_changed = pyqtSignal(int)           # queue_length
+    worker_error        = pyqtSignal(str)            # fatal error message
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -233,11 +240,14 @@ class VJWorker(QThread):
         self._history: list[dict] = []
         self._bpm_mode: BpmMode = BpmMode.LINK
         self._tap_times: list[float] = []
-        self._audio_level: AudioLevel | None = None
         self._beat_detector: MicBeatDetector | None = None
         self._client: OpenAI | None = None
-        # PTT coordination: asyncio event (set on Space press) + threading event (cleared on release)
-        self._ptt_start: asyncio.Event | None = None   # created inside run() on the right loop
+        # Sequence queue state (asyncio-only, no lock needed)
+        self._seq_queue: list[Sequence] = []
+        self._seq_current: Sequence | None = None
+        self._seq_start_beat: float = 0.0
+        # PTT coordination
+        self._ptt_start: asyncio.Event | None = None
         self._stop_recording: threading.Event = threading.Event()
 
     def run(self) -> None:
@@ -270,10 +280,6 @@ class VJWorker(QThread):
 
         self._beat_detector = MicBeatDetector(on_bpm=_on_mic_bpm)
 
-        self._audio_level = AudioLevel()
-        self._audio_level.start()
-        set_audio_level_source(lambda: self._audio_level.level)
-
         nodes = _parse_artnet_nodes(ARTNET_NODES_RAW)
         self._renderer = MultiRenderer([
             ArtNetRenderer(ip, leds, link_clock=self._link_clock)
@@ -283,7 +289,49 @@ class VJWorker(QThread):
         await asyncio.gather(
             self._ptt_loop(),
             self._renderer.render_loop(),
+            self._queue_watcher(),
         )
+
+    # ── Sequence queue management ──────────────────────────────────────────────
+
+    async def _enqueue_async(self, seq: Sequence) -> None:
+        """Start immediately if nothing is playing, otherwise add to queue."""
+        if self._seq_current is None:
+            self._seq_current = seq
+            self._seq_start_beat = self._link_clock.beat
+            self._link_clock.attach_effect(seq)
+            self._renderer.set_effect(seq)
+        else:
+            self._seq_queue.append(seq)
+        self.queue_status_changed.emit(len(self._seq_queue))
+
+    async def _replace_current_async(self, seq: Sequence) -> None:
+        """Immediately swap the current sequence (knob tweaks — bypass phrase boundary)."""
+        self._seq_current = seq
+        self._seq_start_beat = self._link_clock.beat
+        self._link_clock.attach_effect(seq)
+        self._renderer.set_effect(seq)
+
+    async def _queue_watcher(self) -> None:
+        """Wake on sub-beat intervals and advance the queue at phrase boundaries."""
+        while True:
+            tempo = self._link_clock.tempo if self._link_clock else 120.0
+            sleep_secs = 60.0 / max(tempo, 20.0) / 4.0
+            await asyncio.sleep(sleep_secs)
+
+            if self._seq_current is None or not self._seq_queue:
+                continue
+
+            seq_t = self._link_clock.beat - self._seq_start_beat
+            beat_number = self._link_clock._beat_number
+
+            if self._seq_current.is_done(seq_t) and beat_number % PHRASE_BEATS == 0:
+                next_seq = self._seq_queue.pop(0)
+                self._seq_current = next_seq
+                self._seq_start_beat = self._link_clock.beat
+                self._link_clock.attach_effect(next_seq)
+                self._renderer.set_effect(next_seq)
+                self.queue_status_changed.emit(len(self._seq_queue))
 
     async def _ptt_loop(self) -> None:
         self._ptt_start = asyncio.Event()
@@ -291,7 +339,6 @@ class VJWorker(QThread):
         while True:
             self.status_changed.emit("WAITING")
 
-            # Wait for Space key press from the Qt main thread (no pynput)
             await self._ptt_start.wait()
             self._ptt_start.clear()
 
@@ -299,17 +346,13 @@ class VJWorker(QThread):
             self._stop_recording.clear()
 
             def _on_recording_start() -> None:
-                if self._bpm_mode is BpmMode.MIC:
+                if self._bpm_mode is BpmMode.MIC and self._beat_detector:
                     self._beat_detector.pause()
-                else:
-                    self._audio_level.pause()
 
             audio = await asyncio.to_thread(_record_gui, self._stop_recording, _on_recording_start)
 
-            if self._bpm_mode is BpmMode.MIC:
+            if self._bpm_mode is BpmMode.MIC and self._beat_detector:
                 self._beat_detector.resume()
-            else:
-                self._audio_level.resume()
 
             if audio.size == 0:
                 continue
@@ -320,36 +363,46 @@ class VJWorker(QThread):
                 continue
 
             self.status_changed.emit("THINKING")
-            cmd, self._history = await asyncio.to_thread(
-                _chat_to_effect, text, self._history, self._client
+            vj_response, self._history = await asyncio.to_thread(
+                _chat_to_response, text, self._history, self._client
             )
 
-            if cmd.get("bpm") is not None:
-                bpm = float(cmd["bpm"])
+            if vj_response.bpm is not None:
+                bpm = float(vj_response.bpm)
                 self._link_clock.set_bpm(bpm)
                 self.bpm_changed.emit(bpm)
 
-            await self._activate_cmd_async(cmd)
-            self.status_changed.emit("LIVE")
-            self.effect_activated.emit(text, cmd)
+            if vj_response.type == "effect" and vj_response.effect is not None:
+                cmd = vj_response.effect.model_dump()
+                seq = sequence_from_effect_cmd(cmd)
+                await self._enqueue_async(seq)
+                self._current_cmd = cmd
+                self.status_changed.emit("LIVE")
+                self.effect_activated.emit(text, cmd)
 
-    async def _activate_cmd_async(self, cmd: dict) -> None:
-        effect = effect_from_dict(cmd)
-        self._link_clock.attach_effect(effect)
-        self._renderer.set_effect(effect)
-        self._current_cmd = cmd
+            elif vj_response.type == "sequences" and vj_response.sequences:
+                for s in vj_response.sequences:
+                    await self._enqueue_async(sequence_from_dict(s.model_dump()))
+                first_step = vj_response.sequences[0].steps[0]
+                cmd = {"effect": first_step.effect, "params": first_step.params,
+                       "filters": [f.model_dump() for f in first_step.filters]}
+                self._current_cmd = cmd
+                self.status_changed.emit("LIVE")
+                self.effect_activated.emit(text, cmd)
 
     # ── Thread-safe calls from Qt ──────────────────────────────────────────────
 
     def activate_preset(self, cmd: dict) -> None:
-        """Called from Qt thread — schedule effect activation on asyncio loop."""
+        """Called from Qt thread — enqueue effect (phrase-aligned switch)."""
         if self._loop:
             asyncio.run_coroutine_threadsafe(
                 self._activate_and_notify(cmd), self._loop
             )
 
     async def _activate_and_notify(self, cmd: dict) -> None:
-        await self._activate_cmd_async(cmd)
+        seq = sequence_from_effect_cmd(cmd)
+        await self._enqueue_async(seq)
+        self._current_cmd = cmd
         self.status_changed.emit("LIVE")
         self.effect_activated.emit("preset", cmd)
         if cmd.get("bpm") is not None:
@@ -357,14 +410,20 @@ class VJWorker(QThread):
             self.bpm_changed.emit(float(cmd["bpm"]))
 
     def apply_speed(self, speed: float) -> None:
+        """Immediate knob tweak — replaces current sequence without waiting for phrase boundary."""
         if self._current_cmd and self._loop:
             cmd = _apply_speed(self._current_cmd, speed)
-            asyncio.run_coroutine_threadsafe(self._activate_cmd_async(cmd), self._loop)
+            self._current_cmd = cmd
+            seq = sequence_from_effect_cmd(cmd)
+            asyncio.run_coroutine_threadsafe(self._replace_current_async(seq), self._loop)
 
     def apply_brightness(self, brightness: float) -> None:
+        """Immediate knob tweak — replaces current sequence without waiting for phrase boundary."""
         if self._current_cmd and self._loop:
             cmd = _apply_brightness(self._current_cmd, brightness)
-            asyncio.run_coroutine_threadsafe(self._activate_cmd_async(cmd), self._loop)
+            self._current_cmd = cmd
+            seq = sequence_from_effect_cmd(cmd)
+            asyncio.run_coroutine_threadsafe(self._replace_current_async(seq), self._loop)
 
     def set_bpm(self, bpm: float) -> None:
         if self._link_clock:
@@ -372,12 +431,10 @@ class VJWorker(QThread):
             self.bpm_changed.emit(bpm)
 
     def ptt_press(self) -> None:
-        """Called from Qt main thread when Space is pressed (not auto-repeat)."""
         if self._loop and self._ptt_start:
             self._loop.call_soon_threadsafe(self._ptt_start.set)
 
     def ptt_release(self) -> None:
-        """Called from Qt main thread when Space is released."""
         self._stop_recording.set()
 
     def tap_beat(self) -> None:
@@ -399,17 +456,12 @@ class VJWorker(QThread):
 
         if self._bpm_mode is BpmMode.MIC and self._beat_detector:
             self._beat_detector.stop()
-            if self._audio_level:
-                self._audio_level.resume()
 
         self._bpm_mode = next_mode
         self._tap_times = []
 
-        if self._bpm_mode is BpmMode.MIC:
-            if self._audio_level:
-                self._audio_level.pause()
-            if self._beat_detector:
-                self._beat_detector.start()
+        if self._bpm_mode is BpmMode.MIC and self._beat_detector:
+            self._beat_detector.start()
 
         self.bpm_mode_changed.emit(next_mode.value)
 
@@ -536,7 +588,7 @@ class VJMainWindow(QMainWindow):
         self._worker = worker
         self._presets: list[dict | None] = load_presets()
         self._bpm_mode = "link"
-        self._knobs_enabled = False  # enabled once first effect is active
+        self._knobs_enabled = False
 
         self.setWindowTitle("auto-vj")
         self.setMinimumWidth(360)
@@ -559,9 +611,9 @@ class VJMainWindow(QMainWindow):
         worker.bpm_changed.connect(self._on_bpm)
         worker.link_status_changed.connect(self._on_link)
         worker.bpm_mode_changed.connect(self._on_bpm_mode)
+        worker.queue_status_changed.connect(self._on_queue_status)
         worker.worker_error.connect(self._on_worker_error)
 
-        # BPM knob → worker (throttled via timer to avoid flooding)
         self._bpm_knob_timer = QTimer(self)
         self._bpm_knob_timer.setSingleShot(True)
         self._bpm_knob_timer.setInterval(80)
@@ -628,7 +680,10 @@ class VJMainWindow(QMainWindow):
         self._effect_label = QLabel("—")
         self._effect_label.setStyleSheet("color: #666; font-size: 11px;")
         self._effect_label.setWordWrap(True)
+        self._queue_label = QLabel("")
+        self._queue_label.setStyleSheet("color: #333; font-size: 10px;")
         layout.addWidget(self._effect_label)
+        layout.addWidget(self._queue_label)
         return box
 
     def _build_controls_box(self) -> QGroupBox:
@@ -698,16 +753,20 @@ class VJMainWindow(QMainWindow):
             f"<span style='color:{color};font-weight:bold;'>{name}</span>"
             f"  <span style='color:#555;font-size:10px;'>{text[len(name):].strip()}</span>"
         )
-        # Enable knobs and sync speed from effect params
         self._knobs_enabled = True
         params = cmd.get("params", {})
         speed_key = "rate" if name in RATE_EFFECTS else "speed"
         if speed_key in params:
             self._knob_speed.set_value(float(params[speed_key]))
-        # Sync brightness knob from dim filter if present
         for f in cmd.get("filters", []):
             if f["type"] == "dim":
                 self._knob_brightness.set_value(float(f.get("params", {}).get("brightness", 1.0)))
+
+    def _on_queue_status(self, queue_length: int) -> None:
+        if queue_length > 0:
+            self._queue_label.setText(f"{queue_length} queued")
+        else:
+            self._queue_label.setText("")
 
     def _on_bpm(self, bpm: float) -> None:
         self._bpm_label.setText(f"BPM: {bpm:.1f}")
@@ -764,7 +823,6 @@ class VJMainWindow(QMainWindow):
             self._star_btn.setText("★  (no active effect)")
             QTimer.singleShot(1500, lambda: self._star_btn.setText("★  Star current"))
             return
-        # Find first empty slot
         slot = next((i for i, p in enumerate(self._presets) if p is None), None)
         if slot is None:
             self._star_btn.setText("★  All slots full!")
@@ -781,19 +839,15 @@ class VJMainWindow(QMainWindow):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
-        # 1-9 → recall preset slots 0-8
         if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
             self._recall_preset(key - Qt.Key.Key_1)
             return
-        # Space → PTT start (ignore auto-repeat key events while held)
         if key == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._worker.ptt_press()
             return
-        # M → cycle BPM mode
         if key == Qt.Key.Key_M:
             self._worker.cycle_bpm_mode()
             return
-        # Enter → tap beat
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._worker.tap_beat()
             return

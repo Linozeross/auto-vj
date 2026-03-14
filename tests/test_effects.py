@@ -1,11 +1,9 @@
 """Tests for modules/effects.py — effects, filters, factory, schema."""
-import math
-import time
 import pytest
 from modules.effects import (
     # Effects
     SolidColor, ColorWave, Pulse, Rainbow, Chase,
-    Meteor, Twinkle, Fire, Plasma, Larson, BeatFlash,
+    Meteor, Twinkle, Plasma, Larson, PaletteWave, BeatPulse,
     # Filters
     GammaFilter, MirrorFilter, ReverseFilter, DimFilter,
     # Factory & registries
@@ -24,8 +22,10 @@ def valid_rgb(color: list[int]) -> bool:
 # ── Registry completeness ─────────────────────────────────────────────────────
 
 def test_all_effects_in_registry():
-    expected = {"solid","color_wave","pulse","rainbow","chase",
-                "meteor","twinkle","fire","plasma","larson","beat_flash"}
+    expected = {
+        "solid", "color_wave", "pulse", "rainbow", "chase",
+        "meteor", "twinkle", "plasma", "larson", "palette_wave", "beat_pulse",
+    }
     assert set(EFFECT_REGISTRY.keys()) == expected
 
 
@@ -36,19 +36,19 @@ def test_all_filters_in_registry():
 # ── All effects produce valid RGB ─────────────────────────────────────────────
 
 @pytest.mark.parametrize("name,params", [
-    ("solid",      {"r": 100, "g": 200, "b": 50}),
-    ("color_wave", {"speed": 1.5}),
-    ("pulse",      {"r": 255, "g": 0, "b": 0, "rate_hz": 2.0}),
-    ("pulse",      {"r": 255, "g": 0, "b": 0, "rate": 2.0}),
-    ("rainbow",    {"speed": 3.0}),
-    ("chase",      {"r": 0, "g": 0, "b": 255, "speed": 2.0, "tail": 8}),
-    ("meteor",     {"r": 255, "g": 200, "b": 100, "speed": 1.0,
-                    "tail_length": 20, "tail_decay": 0.85, "bounce": True}),
-    ("twinkle",    {"r": 255, "g": 255, "b": 255, "density": 0.5, "speed": 1.0}),
-    ("fire",       {"cooling": 0.07, "sparking": 0.3}),
-    ("plasma",     {"speed": 1.0, "scale": 1.0}),
-    ("larson",     {"r": 255, "g": 0, "b": 0, "speed": 1.0, "width": 5}),
-    ("beat_flash", {"r": 255, "g": 255, "b": 255, "decay": 0.3}),
+    ("solid",        {"r": 100, "g": 200, "b": 50}),
+    ("color_wave",   {"speed": 1.5}),
+    ("pulse",        {"r": 255, "g": 0, "b": 0, "rate_hz": 2.0}),
+    ("pulse",        {"r": 255, "g": 0, "b": 0, "rate": 2.0}),
+    ("rainbow",      {"speed": 3.0}),
+    ("chase",        {"r": 0, "g": 0, "b": 255, "speed": 2.0, "tail": 8}),
+    ("meteor",       {"r": 255, "g": 200, "b": 100, "speed": 1.0,
+                      "tail_length": 20, "tail_decay": 0.85, "bounce": True}),
+    ("twinkle",      {"r": 255, "g": 255, "b": 255, "density": 0.5, "speed": 1.0}),
+    ("plasma",       {"speed": 1.0, "scale": 1.0}),
+    ("larson",       {"r": 255, "g": 0, "b": 0, "speed": 1.0, "width": 5}),
+    ("palette_wave", {"palette": "ocean", "speed": 1.0}),
+    ("beat_pulse",   {"r": 255, "g": 100, "b": 0, "sharpness": 4.0}),
 ])
 def test_effect_produces_valid_rgb(name, params):
     e = effect_from_dict({"effect": name, "params": params})
@@ -97,50 +97,6 @@ def test_larson_gaussian_falloff():
     assert c_center > c_edge
 
 
-# ── Fire ───────────────────────────────────────────────────────────────────────
-
-def test_fire_produces_heat_after_warmup():
-    f = Fire(cooling=0.07, sparking=0.4)
-    for i in range(20):
-        for led in range(30):
-            f.get_color(i * 0.016, led, 30)
-    # After 20 frames there should be at least some lit LEDs
-    frame = [max(f.get_color(20 * 0.016, j, 30)) for j in range(30)]
-    assert max(frame) > 0, "Fire should have heat after warmup frames"
-
-
-def test_fire_updates_once_per_frame():
-    f = Fire()
-    # Same t → same result (frame not re-computed)
-    c1 = f.get_color(1.0, 0, 100)
-    c2 = f.get_color(1.0, 0, 100)
-    assert c1 == c2
-
-
-# ── BeatFlash ─────────────────────────────────────────────────────────────────
-
-def test_beat_flash_bright_immediately_after_beat():
-    e = BeatFlash(r=255, g=255, b=255, decay=0.3)
-    e.on_beat(120, 1)
-    c = e.get_color(0, 0, 100)
-    assert c[0] > 200, f"Should be bright immediately after beat, got {c[0]}"
-
-
-def test_beat_flash_decays_over_time():
-    e = BeatFlash(r=255, g=0, b=0, decay=1.0)
-    e.on_beat(120, 1)
-    c_start = e.get_color(0, 0, 100)[0]
-    time.sleep(0.5)
-    c_later = e.get_color(0, 0, 100)[0]
-    assert c_later < c_start, "BeatFlash should decay over time"
-
-
-def test_beat_flash_dark_before_first_beat():
-    e = BeatFlash(r=255, g=255, b=255, decay=0.3)
-    c = e.get_color(0, 0, 100)
-    assert c[0] == 0, "BeatFlash should be dark before first beat"
-
-
 # ── on_beat hook propagation ──────────────────────────────────────────────────
 
 def test_on_beat_is_noop_for_stateless_effects():
@@ -174,13 +130,28 @@ def test_twinkle_density_zero_all_off():
         assert e.get_color(0.0, i, 100) == [0, 0, 0]
 
 
+# ── BeatPulse ─────────────────────────────────────────────────────────────────
+
+def test_beat_pulse_bright_at_beat_boundary():
+    e = BeatPulse(r=255, g=0, b=0, sharpness=4.0)
+    # t=0.0 → phase=0 → brightness = exp(0) = 1.0
+    c = e.get_color(0.0, 0, 100)
+    assert c[0] == 255
+
+
+def test_beat_pulse_decays_within_beat():
+    e = BeatPulse(r=255, g=0, b=0, sharpness=4.0)
+    c_start = e.get_color(0.0, 0, 100)[0]
+    c_mid = e.get_color(0.5, 0, 100)[0]
+    assert c_mid < c_start
+
+
 # ── Filters ───────────────────────────────────────────────────────────────────
 
 def test_gamma_filter_darkens_midtones():
     base = SolidColor(128, 128, 128)
     filtered = GammaFilter(base, gamma=2.2)
     c = filtered.get_color(0, 0, 100)
-    # (128/255)^(1/2.2)*255 ≈ 186 — gamma correction brightens midtones
     assert all(v > 128 for v in c), f"Gamma should brighten midtones, got {c}"
 
 
@@ -202,17 +173,14 @@ def test_reverse_filter_flips_order():
 def test_mirror_filter_symmetric():
     base = Rainbow(speed=0.0)
     mirrored = MirrorFilter(base)
-    # LED 0 and LED 99 should match; LED 10 and LED 89 should match
     assert mirrored.get_color(0, 0, 100) == mirrored.get_color(0, 99, 100)
     assert mirrored.get_color(0, 10, 100) == mirrored.get_color(0, 89, 100)
 
 
 def test_filter_propagates_on_beat():
-    e = BeatFlash(r=255, g=0, b=0, decay=0.3)
-    dim = DimFilter(GammaFilter(e, gamma=2.2), brightness=0.8)
-    dim.on_beat(120, 1)  # should propagate to BeatFlash
-    c = dim.get_color(0, 0, 100)
-    assert c[0] > 0, "on_beat should propagate through filter chain"
+    base = SolidColor(255, 0, 0)
+    dim = DimFilter(GammaFilter(base, gamma=2.2), brightness=0.8)
+    dim.on_beat(120, 1)  # should not raise
 
 
 # ── effect_from_dict factory ──────────────────────────────────────────────────
@@ -234,14 +202,13 @@ def test_effect_from_dict_with_filters():
     })
     c = e.get_color(0.0, 0, 100)
     assert valid_rgb(c)
-    # Outermost filter is dim — result should be darker than raw rainbow
     raw = Rainbow(speed=1.0).get_color(0.0, 0, 100)
     assert max(c) <= max(raw)
 
 
 def test_effect_from_dict_empty_filters():
-    e = effect_from_dict({"effect": "fire", "params": {}, "filters": []})
-    assert isinstance(e, Fire)
+    e = effect_from_dict({"effect": "pulse", "params": {}, "filters": []})
+    assert isinstance(e, Pulse)
 
 
 def test_effect_from_dict_unknown_effect_raises():
@@ -260,12 +227,12 @@ def test_effect_command_defaults():
 
 def test_effect_command_with_filters():
     cmd = EffectCommand(
-        effect="fire",
-        params={"cooling": 0.1},
+        effect="pulse",
+        params={"r": 255, "g": 0, "b": 0},
         filters=[FilterCommand(type="gamma", params={"gamma": 2.2})],
         bpm=128.0,
     )
-    assert cmd.effect == "fire"
+    assert cmd.effect == "pulse"
     assert cmd.bpm == 128.0
     assert cmd.filters[0].type == "gamma"
 

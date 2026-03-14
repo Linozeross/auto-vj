@@ -1,20 +1,9 @@
 import math
 import random
-import time
 import colorsys
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 from pydantic import BaseModel
-
-
-# ── Audio level source (injected from tui.py) ──────────────────────────────────
-
-_audio_level_fn: Callable[[], float] = lambda: 0.0
-
-
-def set_audio_level_source(fn: Callable[[], float]) -> None:
-    global _audio_level_fn
-    _audio_level_fn = fn
 
 
 # ── Color palettes ─────────────────────────────────────────────────────────────
@@ -54,7 +43,7 @@ def _palette_color(palette: list[tuple[int, int, int]], pos: float) -> list[int]
 class Effect(ABC):
     @abstractmethod
     def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
-        """Return [r, g, b] for a given LED at time t (seconds since activation)."""
+        """Return [r, g, b] for a given LED at time t (beats since activation)."""
         ...
 
     def on_beat(self, bpm: float, beat_number: int) -> None:
@@ -112,7 +101,7 @@ class DimFilter(Filter):
         return [int(v * self._brightness) for v in rgb]
 
 
-# ── Original effects ───────────────────────────────────────────────────────────
+# ── Effects ────────────────────────────────────────────────────────────────────
 
 class SolidColor(Effect):
     def __init__(self, r: int = 255, g: int = 255, b: int = 255, **_):
@@ -177,8 +166,6 @@ class Chase(Effect):
         return [0, 0, 0]
 
 
-# ── New effects ────────────────────────────────────────────────────────────────
-
 class Meteor(Effect):
     """Shooting star with exponential decay tail, optional bounce."""
     def __init__(self, r: int = 255, g: int = 200, b: int = 100,
@@ -200,7 +187,6 @@ class Meteor(Effect):
 
         dist = head - led_index
         if -2 <= dist < 0:
-            # bright head (2 LEDs wide)
             return [self.r, self.g, self.b]
         elif 0 <= dist < self.tail_length:
             brightness = self.tail_decay ** dist
@@ -238,57 +224,6 @@ class Twinkle(Effect):
         return [int(self.r * brightness), int(self.g * brightness), int(self.b * brightness)]
 
 
-class Fire(Effect):
-    """Classic fire simulation with heat diffusion and palette mapping."""
-    def __init__(self, cooling: float = 0.07, sparking: float = 0.12,
-                 reverse: bool = False, **_):
-        self.cooling = float(cooling)
-        self.sparking = float(sparking)
-        self.reverse = bool(reverse)
-        self._heat: list[float] = []
-        self._last_t: float = -1.0
-
-    def _update(self, total_leds: int, dt: float) -> None:
-        if len(self._heat) != total_leds:
-            self._heat = [0.0] * total_leds
-
-        # Step 1: Cool every cell
-        for i in range(total_leds):
-            cool = random.uniform(0, self.cooling * dt * 60)
-            self._heat[i] = max(0.0, self._heat[i] - cool)
-
-        # Step 2: Heat diffuses upward (from base toward tip)
-        for i in range(total_leds - 1, 1, -1):
-            self._heat[i] = (self._heat[i - 1] + self._heat[i - 2] * 2) / 3.0
-
-        # Step 3: Randomly ignite base
-        for i in range(min(3, total_leds)):
-            if random.random() < self.sparking:
-                self._heat[i] = min(1.0, self._heat[i] + random.uniform(0.5, 1.0))
-
-    @staticmethod
-    def _heat_to_rgb(heat: float) -> list[int]:
-        if heat < 0.33:
-            return [int(heat / 0.33 * 255), 0, 0]
-        elif heat < 0.66:
-            f = (heat - 0.33) / 0.33
-            return [255, int(f * 255), 0]
-        else:
-            f = (heat - 0.66) / 0.34
-            return [255, 255, int(f * 255)]
-
-    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
-        if abs(t - self._last_t) > 1e-4:
-            dt = max(0.001, t - self._last_t) if self._last_t >= 0 else 0.016
-            self._last_t = t
-            self._update(total_leds, dt)
-
-        if not self._heat:
-            return [0, 0, 0]
-        idx = led_index if not self.reverse else (total_leds - 1 - led_index)
-        return self._heat_to_rgb(self._heat[idx])
-
-
 class Plasma(Effect):
     """Psychedelic overlapping sine waves mapped to hue."""
     def __init__(self, speed: float = 1.0, scale: float = 1.0, **_):
@@ -321,34 +256,13 @@ class Larson(Effect):
         return [int(self.r * brightness), int(self.g * brightness), int(self.b * brightness)]
 
 
-class BeatFlash(Effect):
-    """Flashes to full brightness on each beat and decays exponentially between beats."""
-    def __init__(self, r: int = 255, g: int = 255, b: int = 255,
-                 decay: float = 0.3, **_):
-        self.r = int(r)
-        self.g = int(g)
-        self.b = int(b)
-        self.decay = float(decay)
-        self._last_beat_time: float = -1e9  # far in the past → near-zero brightness
-
-    def on_beat(self, _bpm: float, _beat_number: int) -> None:
-        self._last_beat_time = time.monotonic()
-
-    def get_color(self, _t: float, led_index: int, total_leds: int) -> list[int]:
-        dt = time.monotonic() - self._last_beat_time
-        brightness = math.exp(-self.decay * dt * 10)
-        return [int(self.r * brightness), int(self.g * brightness), int(self.b * brightness)]
-
-
-# ── Palette & beat & audio effects ────────────────────────────────────────────
-
 class PaletteWave(Effect):
-    """Scrolls a named color palette along the strip — no harsh primaries."""
+    """Scrolls a named color palette along the strip."""
     def __init__(self, palette: str = "ember", speed: float = 1.0,
                  stretch: float = 1.0, **_):
         self._palette = PALETTES.get(palette, PALETTES["ember"])
         self.speed = float(speed)
-        self.stretch = float(stretch)  # > 1 = wider gradient repeat
+        self.stretch = float(stretch)
 
     def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
         pos = (led_index / total_leds * self.stretch + t * self.speed) % 1.0
@@ -356,10 +270,7 @@ class PaletteWave(Effect):
 
 
 class BeatPulse(Effect):
-    """
-    Sharp flash at beat boundary (t % 1.0 == 0) with exponential decay until
-    next beat — fully driven by beat-time t, no wall-clock drift.
-    """
+    """Sharp flash at beat boundary (t % 1.0 == 0) with exponential decay."""
     BEAT_SHARPNESS_DEFAULT = 4.0
 
     def __init__(self, r: int = 255, g: int = 100, b: int = 0,
@@ -367,55 +278,21 @@ class BeatPulse(Effect):
         self.r = int(r)
         self.g = int(g)
         self.b = int(b)
-        self.sharpness = float(sharpness)  # higher = faster decay within beat
+        self.sharpness = float(sharpness)
 
     def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
-        phase = t % 1.0  # 0.0 at beat, 1.0 just before next beat
+        phase = t % 1.0
         brightness = math.exp(-self.sharpness * phase)
         return [int(self.r * brightness), int(self.g * brightness), int(self.b * brightness)]
 
 
-class AudioPulse(Effect):
-    """All LEDs scale with microphone amplitude — reacts to bass hits and vocals."""
-    AUDIO_SENSITIVITY_DEFAULT = 2.0
-
-    def __init__(self, r: int = 255, g: int = 60, b: int = 0,
-                 sensitivity: float = AUDIO_SENSITIVITY_DEFAULT, **_):
-        self.r = int(r)
-        self.g = int(g)
-        self.b = int(b)
-        self.sensitivity = float(sensitivity)
-
-    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
-        level = min(1.0, _audio_level_fn() * self.sensitivity)
-        return [int(self.r * level), int(self.g * level), int(self.b * level)]
-
-
-class AudioWave(Effect):
-    """
-    Audio amplitude radiates outward from strip center as a colored ring.
-    Uses a named palette so colors stay rich.
-    """
-    AUDIO_SENSITIVITY_DEFAULT = 2.0
-
-    def __init__(self, palette: str = "ember",
-                 sensitivity: float = AUDIO_SENSITIVITY_DEFAULT, **_):
-        self._palette = PALETTES.get(palette, PALETTES["ember"])
-        self.sensitivity = float(sensitivity)
-
-    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
-        level = min(1.0, _audio_level_fn() * self.sensitivity)
-        center = total_leds / 2.0
-        dist = abs(led_index - center) / center  # 0 at center, 1 at edges
-        # light up from center outward proportional to level
-        if dist > level:
-            return [0, 0, 0]
-        brightness = 1.0 - (dist / max(level, 1e-4))
-        color = _palette_color(self._palette, dist)
-        return [int(c * brightness) for c in color]
-
-
 # ── GPT schema ─────────────────────────────────────────────────────────────────
+
+EFFECT_NAMES = Literal[
+    "solid", "color_wave", "pulse", "rainbow", "chase",
+    "meteor", "twinkle", "plasma", "larson", "palette_wave", "beat_pulse",
+]
+
 
 class FilterCommand(BaseModel):
     type: Literal["gamma", "mirror", "reverse", "dim"]
@@ -423,13 +300,29 @@ class FilterCommand(BaseModel):
 
 
 class EffectCommand(BaseModel):
-    effect: Literal[
-        "solid", "color_wave", "pulse", "rainbow", "chase",
-        "meteor", "twinkle", "fire", "plasma", "larson", "beat_flash",
-        "palette_wave", "beat_pulse", "audio_pulse", "audio_wave",
-    ]
+    effect: EFFECT_NAMES
     params: dict[str, Any] = {}
     filters: list[FilterCommand] = []
+    bpm: float | None = None
+
+
+class SequenceStepCommand(BaseModel):
+    effect: EFFECT_NAMES
+    params: dict[str, Any] = {}
+    filters: list[FilterCommand] = []
+    duration_bars: float = 4.0  # 1 bar = 4 beats
+
+
+class SequenceCommand(BaseModel):
+    steps: list[SequenceStepCommand]
+    repeats: int = 1
+    name: str = ""
+
+
+class VJResponse(BaseModel):
+    type: Literal["effect", "sequences"]
+    effect: EffectCommand | None = None
+    sequences: list[SequenceCommand] = []
     bpm: float | None = None
 
 
@@ -443,14 +336,10 @@ EFFECT_REGISTRY: dict[str, type[Effect]] = {
     "chase":        Chase,
     "meteor":       Meteor,
     "twinkle":      Twinkle,
-    "fire":         Fire,
     "plasma":       Plasma,
     "larson":       Larson,
-    "beat_flash":   BeatFlash,
     "palette_wave": PaletteWave,
     "beat_pulse":   BeatPulse,
-    "audio_pulse":  AudioPulse,
-    "audio_wave":   AudioWave,
 }
 
 FILTER_REGISTRY: dict[str, type[Filter]] = {

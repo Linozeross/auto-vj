@@ -2,14 +2,26 @@
 import asyncio
 import pytest
 from modules.bpm import LinkClock
-from modules.effects import BeatFlash
+from modules.effects import Effect
+
+
+class _BeatCounter(Effect):
+    """Minimal effect that counts on_beat() calls."""
+    def __init__(self):
+        self.count = 0
+
+    def get_color(self, t, led_index, total_leds):
+        return [0, 0, 0]
+
+    def on_beat(self, bpm, beat_number):
+        self.count += 1
 
 
 @pytest.mark.asyncio
 async def test_link_clock_fires_beats():
     clock = LinkClock()
-    flash = BeatFlash(r=255, g=0, b=0, decay=0.3)
-    clock.attach_effect(flash)
+    counter = _BeatCounter()
+    clock.attach_effect(counter)
     clock.set_bpm(300)  # 300 BPM → 5 beats/second
     clock.start()
     await asyncio.sleep(1.3)  # expect ~5 beats (first sync waits up to 1 beat boundary)
@@ -36,14 +48,13 @@ async def test_link_clock_clamps_bpm():
 @pytest.mark.asyncio
 async def test_link_clock_attach_effect_receives_on_beat():
     clock = LinkClock()
-    flash = BeatFlash(r=255, g=0, b=0, decay=0.3)
-    clock.attach_effect(flash)
+    counter = _BeatCounter()
+    clock.attach_effect(counter)
     clock.set_bpm(300)  # 0.2s per beat
     clock.start()
     await asyncio.sleep(0.4)  # wait for at least 1 beat
     clock.stop()
-    c = flash.get_color(0, 0, 100)
-    assert c[0] > 0, "BeatFlash should have been triggered by on_beat()"
+    assert counter.count > 0, "on_beat() should have been called at least once"
 
 
 @pytest.mark.asyncio
