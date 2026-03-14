@@ -5,7 +5,8 @@
       "Bash(mkdir -p /Users/lino/auto-vj/tests)",
       "Bash(touch /Users/lino/auto-vj/tests/__init__.py)",
       "Bash(uv add:*)",
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "WebFetch(domain:platform.openai.com)"
     ]
   }
 }

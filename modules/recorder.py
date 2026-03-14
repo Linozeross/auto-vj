@@ -1,3 +1,4 @@
+import base64
 import io
 import time
 import wave
@@ -5,7 +6,6 @@ from collections.abc import Callable
 import numpy as np
 import sounddevice as sd
 from pynput import keyboard
-from openai import OpenAI
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -50,14 +50,12 @@ def record_until_release(on_recording_start: Callable[[], None] | None = None) -
     return np.concatenate(frames, axis=0)
 
 
-def transcribe(audio: np.ndarray, client: OpenAI) -> str:
+def audio_to_wav_b64(audio: np.ndarray) -> str:
+    """Encode a mono int16 numpy array as a base64 WAV string."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(2)  # int16 = 2 bytes
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(audio.tobytes())
-    buf.seek(0)
-    buf.name = "recording.wav"
-    result = client.audio.transcriptions.create(model="whisper-1", file=buf)
-    return result.text
+    return base64.b64encode(buf.getvalue()).decode()

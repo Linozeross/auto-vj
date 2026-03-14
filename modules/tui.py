@@ -5,6 +5,8 @@ import json
 import os
 import time
 
+import numpy as np
+
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -18,7 +20,7 @@ from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
 from modules.effects import VJResponse
-from modules.recorder import record_until_release, transcribe
+from modules.recorder import record_until_release, audio_to_wav_b64
 from modules.sequences import Sequence, sequence_from_dict, sequence_from_effect_cmd, PHRASE_BEATS
 
 load_dotenv()
@@ -310,14 +312,9 @@ class VJApp(App):
             if audio.size == 0:
                 continue
 
-            self.post_message(StatusChanged("TRANSCRIBING"))
-            text = await asyncio.to_thread(transcribe, audio, client)
-            if not text.strip():
-                continue
-
             self.post_message(StatusChanged("THINKING"))
             vj_response, history = await asyncio.to_thread(
-                _chat_to_response, text, history, client
+                _chat_to_response, audio, history, client
             )
 
             if vj_response.bpm is not None:
@@ -416,16 +413,21 @@ class VJApp(App):
 
 
 # ── GPT helper (runs in thread) ────────────────────────────────────────────────
-def _chat_to_response(text: str, history: list[dict], client: OpenAI) -> tuple[VJResponse, list[dict]]:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": text}]
+def _chat_to_response(audio: np.ndarray, history: list[dict], client: OpenAI) -> tuple[VJResponse, list[dict]]:
+    b64 = audio_to_wav_b64(audio)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+        {"role": "user", "content": [
+            {"type": "input_audio", "input_audio": {"data": b64, "format": "wav"}},
+        ]},
+    ]
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o-audio-preview",
+        modalities=["text"],
         messages=messages,
-        response_format={"type": "json_object"},
     )
     raw = response.choices[0].message.content
     new_history = history + [
-        {"role": "user", "content": text},
+        {"role": "user", "content": "[voice command]"},
         {"role": "assistant", "content": raw},
     ]
     vj_response = VJResponse.model_validate(json.loads(raw))

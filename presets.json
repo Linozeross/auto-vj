@@ -28,8 +28,33 @@
       "bpm": null
     }
   },
-  null,
-  null,
+  {
+    "label": "meteor",
+    "cmd": {
+      "effect": "meteor",
+      "params": {
+        "r": 255,
+        "g": 128,
+        "b": 0,
+        "speed": 1.0,
+        "tail_length": 20,
+        "tail_decay": 0.85,
+        "bounce": true
+      },
+      "filters": [],
+      "bpm": null
+    }
+  },
+  {
+    "label": "rainbow",
+    "cmd": {
+      "effect": "rainbow",
+      "params": {
+        "speed": 4.0
+      },
+      "filters": []
+    }
+  },
   null,
   null,
   null,
