@@ -13,7 +13,7 @@ from textual.widgets import DataTable, Footer, Header, Label, Static
 from textual.containers import Horizontal, Vertical
 
 from modules.artnet_renderer import ArtNetRenderer
-from modules.bpm import BpmClock
+from modules.bpm import LinkClock
 from modules.effects import effect_from_dict
 from modules.recorder import record_until_release, transcribe
 
@@ -65,6 +65,13 @@ class BpmChanged(Message):
     def __init__(self, bpm: float) -> None:
         super().__init__()
         self.bpm = bpm
+
+
+class LinkStatusChanged(Message):
+    def __init__(self, tempo: float, peers: int) -> None:
+        super().__init__()
+        self.tempo = tempo
+        self.peers = peers
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -128,6 +135,11 @@ class VJApp(App):
         color: $accent;
     }
 
+    #link-label {
+        margin-top: 1;
+        color: $success;
+    }
+
     DataTable {
         height: 1fr;
     }
@@ -148,6 +160,7 @@ class VJApp(App):
                 yield Label("WAITING", id="status")
                 yield Static("[dim]No effect yet[/]", id="effect-label")
                 yield Static("[dim]BPM: —[/]", id="bpm-label")
+                yield Static("[dim]Link: —[/]", id="link-label")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -156,9 +169,19 @@ class VJApp(App):
         table.cursor_type = "row"
 
         client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        renderer = ArtNetRenderer(ARTNET_IP, LED_COUNT)
-        self._bpm_clock = BpmClock()
-        self._bpm_clock.start()
+        self._link_clock = LinkClock()
+
+        def _on_tempo(t: float) -> None:
+            self.post_message(LinkStatusChanged(t, self._link_clock.num_peers))
+
+        def _on_peers(n: int) -> None:
+            self.post_message(LinkStatusChanged(self._link_clock.tempo, n))
+
+        self._link_clock.set_tempo_callback(_on_tempo)
+        self._link_clock.set_num_peers_callback(_on_peers)
+        self._link_clock.start()
+
+        renderer = ArtNetRenderer(ARTNET_IP, LED_COUNT, link_clock=self._link_clock)
 
         self.run_worker(self._ptt_loop(renderer, client), exclusive=False)
         self.run_worker(renderer.render_loop(), exclusive=False)
@@ -178,11 +201,11 @@ class VJApp(App):
 
             if cmd.get("bpm") is not None:
                 bpm = float(cmd["bpm"])
-                self._bpm_clock.set_bpm(bpm)
+                self._link_clock.set_bpm(bpm)
                 self.post_message(BpmChanged(bpm))
 
             effect = effect_from_dict(cmd)
-            self._bpm_clock.attach_effect(effect)
+            self._link_clock.attach_effect(effect)
             renderer.set_effect(effect)
             self.post_message(StatusChanged("LIVE"))
             self.post_message(EffectActivated(text, cmd))
@@ -206,6 +229,10 @@ class VJApp(App):
 
     def on_bpm_changed(self, msg: BpmChanged) -> None:
         self.query_one("#bpm-label", Static).update(f"[bold]BPM: {msg.bpm:.1f}[/]")
+
+    def on_link_status_changed(self, msg: LinkStatusChanged) -> None:
+        peers_str = f"{msg.peers} peer{'s' if msg.peers != 1 else ''}" if msg.peers else "solo"
+        self.query_one("#link-label", Static).update(f"[bold]Link: {msg.tempo:.1f} BPM  [{peers_str}][/]")
 
 
 # ── GPT helper (runs in thread) ────────────────────────────────────────────────

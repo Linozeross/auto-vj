@@ -7,16 +7,17 @@ LEDS_PER_UNIVERSE = 170
 
 
 class ArtNetRenderer:
-    def __init__(self, ip: str, total_leds: int, fps: int = 100):
+    def __init__(self, ip: str, total_leds: int, fps: int = 100, link_clock=None):
         self._ip = ip
         self._total_leds = total_leds
         self._fps = fps
         self._effect: Effect = SolidColor(0, 0, 0)
-        self._start_time: float = time.monotonic()
+        self._link_clock = link_clock
+        self._beat_offset: float = link_clock.beat if link_clock else time.monotonic()
 
     def set_effect(self, effect: Effect) -> None:
         self._effect = effect
-        self._start_time = time.monotonic()
+        self._beat_offset = self._link_clock.beat if self._link_clock else time.monotonic()
 
     async def render_loop(self) -> None:
         node = pyartnet.ArtNetNode.create(self._ip, max_fps=self._fps)
@@ -37,7 +38,10 @@ class ArtNetRenderer:
 
             interval = 1.0 / self._fps
             while True:
-                t = time.monotonic() - self._start_time
+                if self._link_clock:
+                    t = self._link_clock.beat - self._beat_offset
+                else:
+                    t = time.monotonic() - self._beat_offset
                 effect = self._effect
                 for u, ch, offset, count in universes:
                     values = []

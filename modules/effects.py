@@ -95,14 +95,15 @@ class ColorWave(Effect):
 
 
 class Pulse(Effect):
-    def __init__(self, r: int = 255, g: int = 255, b: int = 255, rate_hz: float = 1.0, **_):
+    def __init__(self, r: int = 255, g: int = 255, b: int = 255,
+                 rate: float = 1.0, rate_hz: float | None = None, **_):
         self.r = int(r)
         self.g = int(g)
         self.b = int(b)
-        self.rate_hz = float(rate_hz)
+        self.rate = float(rate_hz if rate_hz is not None else rate)
 
     def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
-        brightness = (math.sin(2 * math.pi * self.rate_hz * t) + 1) / 2
+        brightness = (math.sin(2 * math.pi * self.rate * t) + 1) / 2
         return [int(self.r * brightness), int(self.g * brightness), int(self.b * brightness)]
 
 

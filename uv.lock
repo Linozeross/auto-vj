@@ -3,6 +3,38 @@ revision = 1
 requires-python = ">=3.13"
 
 [[package]]
+name = "aalink"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c5/e4/5a9ff49b1c212be9a08d21a2287b79012c739c5ae4c9b18d2fe8b0611108/aalink-0.2.1.tar.gz", hash = "sha256:ab3417bfe07559788cc8bde36bc9adedc0e65dfc64f7389d438f0e27e17255a9", size = 5675164 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/70/be202eb415fa768314abf1d39303794119f4789b3b7b6752eb5bc9c1ddcd/aalink-0.2.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:3787e51958ddaed87cc0b84c32d34fc7062918677223d8886e21cdb8a153793c", size = 202011 },
+    { url = "https://files.pythonhosted.org/packages/f8/23/3282d698920f701e0a05fb1379c0586890ac4a4c2e85deae9bc5c1c166d8/aalink-0.2.1-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:3d2a6a7c5707e27c06b1be5e2d3b0fb2654437699226b21ca951b1cc84f7f28b", size = 217346 },
+    { url = "https://files.pythonhosted.org/packages/08/95/4adedee15b7da36f3e818a3d05e7b9512e9f5e77fa5486cecbf8c903fb19/aalink-0.2.1-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:85190c1227c5ec11e0108d54f0b67e3f5d5925b0df1b85f003db56839e50945e", size = 216120 },
+    { url = "https://files.pythonhosted.org/packages/dd/8a/22e6c57e2fb42b7508ca1cad7c332ee2973d22decbb02fa58afc49bd1473/aalink-0.2.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:7e198f6d444b96d918a03c6c5816249a846b9545e636a270882e505b257577e2", size = 228519 },
+    { url = "https://files.pythonhosted.org/packages/a3/e1/b459b4c15a75b7ac8fabfcfd944170324e3566902ce8f1c6e300fd291718/aalink-0.2.1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:1fe770ac6e7020ce90ee46ac4393b048f2862331624bb72b8ab101c3cede0f4d", size = 1208351 },
+    { url = "https://files.pythonhosted.org/packages/af/fc/fbfa0ebf0e66230a595c71ad23f0204c1817783cee41f933968c8dcfaf52/aalink-0.2.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:f240fd03bc96f220e7cdea7d6962d1525cd1af1d2eef7e5a29152e9bd29470b0", size = 1271730 },
+    { url = "https://files.pythonhosted.org/packages/10/7c/d0ba39107e16ebf6c7ac4ed1e498df81dc499bfec12d2b86919a40250574/aalink-0.2.1-cp313-cp313-win_amd64.whl", hash = "sha256:8de31e084d9169cbf60a6f88b142a289d3c36f358c3761b84dc5941dd6b0cde9", size = 195530 },
+    { url = "https://files.pythonhosted.org/packages/5b/63/fb31950000c53a6869941b9883dc03fea4f8402a106bacd6e81d14743f99/aalink-0.2.1-cp313-cp313-win_arm64.whl", hash = "sha256:18ad8c48f4de695aabae60a8824b121a246c7e6555aee565af764f58ccfdd222", size = 186993 },
+    { url = "https://files.pythonhosted.org/packages/94/5a/c7323f21bac334afdca01b70e8e183f8d87ab58209600b2ff34131177276/aalink-0.2.1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:6404ba902b36ca6289292ec29d210324db87ad50cfb272c063ee8215ee98f7e1", size = 202325 },
+    { url = "https://files.pythonhosted.org/packages/24/92/b745d7e847e4b9537c065374783387c8fa546645a380142f5938b46cf270/aalink-0.2.1-cp314-cp314-macosx_11_0_x86_64.whl", hash = "sha256:a4227608a8439b28d0e3e704a87ca8dab683167eca41c4ba0b50cbf1033eddcd", size = 217427 },
+    { url = "https://files.pythonhosted.org/packages/e7/6c/e900de78e06ff20504cf4808a7811d1436b43a92c2b9775824997c6f2c79/aalink-0.2.1-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:43b8b070acc98d225cc19cc5fca2d988bdd54f197a0b44ce7f6b4c023f0bf321", size = 216217 },
+    { url = "https://files.pythonhosted.org/packages/b9/ab/11ef7c7bdebe71bd916ae485589236083d02ac8b101f678661a726776ac6/aalink-0.2.1-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:91a7d840cf67177f09d4a30149fb9d5532f967d32670dc0a94c4ac1909526ed7", size = 229030 },
+    { url = "https://files.pythonhosted.org/packages/75/0c/9a3f3e6d04d0155fe251726039a2a79185b1f8823a2da139ddad25a66904/aalink-0.2.1-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:623a07b9fa401686b61a2cbe578ef4ada76ba247c276805f35d8ea7ef276fb29", size = 1208707 },
+    { url = "https://files.pythonhosted.org/packages/fc/a3/6fe8b617f5822c181723bbda800eb5426642d79b2d25b9876644c25cf3fe/aalink-0.2.1-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:aa9a82af09523a4e643dabff3e947b60955391a68604c3ecc308a0593b9b47d6", size = 1272169 },
+    { url = "https://files.pythonhosted.org/packages/51/26/6ea06bf4007064ca06387e4897abe5a98deccc5f80118bd8ffd259c8664b/aalink-0.2.1-cp314-cp314-win_amd64.whl", hash = "sha256:4a3e5492a0116ed1a9078d9bcf83f97e6a9e2c4d11b7ce03b072daa6c5980d7b", size = 201285 },
+    { url = "https://files.pythonhosted.org/packages/bd/ed/471e448e874f43b27db987d90568c86c81d9b2821614ae792209dbcb99e9/aalink-0.2.1-cp314-cp314-win_arm64.whl", hash = "sha256:db210d69f2814d47b0a50fe841eb202e1ae3c4c7a4f98a8bf55e12de03c9150e", size = 192667 },
+    { url = "https://files.pythonhosted.org/packages/3c/a9/499677a68c2d4e94efca1393110a711fb2a98a4e62acc708629f2efeb50f/aalink-0.2.1-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:627d575450529456556a5741b2bfe4bf1fa71f60e455468b32738f3f80233989", size = 208333 },
+    { url = "https://files.pythonhosted.org/packages/51/cc/27891845fcad3edb13218b1c86f2c30f5fc8f516fc03d1c1019e38660dbd/aalink-0.2.1-cp314-cp314t-macosx_11_0_x86_64.whl", hash = "sha256:0ccfeb2584e301d0dfb0d6eda3e7eab117d57c0167fab9ffaee2370ebd0bf443", size = 223374 },
+    { url = "https://files.pythonhosted.org/packages/bb/a2/5b3bec80c71bb3a3130bb514f3a7aa56797227ff3bd2172a34b900d11b74/aalink-0.2.1-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:7bac291fce7d40eef8a38884940ec028ea6ac976d95d3e2fe7c15c1eb4321f56", size = 217639 },
+    { url = "https://files.pythonhosted.org/packages/ce/70/458b0123e56d07d8c607714e9c5808f86d7934bdcb89876975d27edf865a/aalink-0.2.1-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:7ba255d0d675bb47e4244ef2d929c3a1500d4124c503f02361dea3b753bbe09d", size = 230632 },
+    { url = "https://files.pythonhosted.org/packages/c1/d5/01f75af987262a5da5f53e01bbbb591f71773932aff5138d4232dba913f3/aalink-0.2.1-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:d4887cb36fda48ff5befa0b6b514848c95c3fde9a2cabd2aba6537bc8c997a2b", size = 1210232 },
+    { url = "https://files.pythonhosted.org/packages/2e/d4/cdd6c78c218667dc0e6904eec12aa54e543ca4227082cff82b7b8f6459a0/aalink-0.2.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:32d91d41523d662a978912ec6280c1bb6f97aa6c6a30217e3694f6e17bbe629a", size = 1273922 },
+    { url = "https://files.pythonhosted.org/packages/f7/17/4cb5fd71d31d82d1061c13f2f780eba0190d0281f6a6be204e1c8f74bcbd/aalink-0.2.1-cp314-cp314t-win_amd64.whl", hash = "sha256:1428b08ab37fea5f60993ae40c9f34d7d097adede051e34ddaa79c3ecf396c5e", size = 211685 },
+    { url = "https://files.pythonhosted.org/packages/4b/90/6e023beda17ae3293d278f3e374bbd6e1739c4e7f6ea8eeab2f2424b78e7/aalink-0.2.1-cp314-cp314t-win_arm64.whl", hash = "sha256:113c9818617e3912730e272d194e5229f120f9e1145f4898193e0de488b97465", size = 198037 },
+]
+
+[[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -28,6 +60,7 @@ name = "auto-vj"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aalink" },
     { name = "numpy" },
     { name = "openai" },
     { name = "pyartnet" },
@@ -46,6 +79,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aalink", specifier = ">=0.2.1" },
     { name = "numpy" },
     { name = "openai", specifier = ">=1.0" },
     { name = "pyartnet", specifier = ">=2.0" },

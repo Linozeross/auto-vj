@@ -39,6 +39,7 @@ def test_all_filters_in_registry():
     ("solid",      {"r": 100, "g": 200, "b": 50}),
     ("color_wave", {"speed": 1.5}),
     ("pulse",      {"r": 255, "g": 0, "b": 0, "rate_hz": 2.0}),
+    ("pulse",      {"r": 255, "g": 0, "b": 0, "rate": 2.0}),
     ("rainbow",    {"speed": 3.0}),
     ("chase",      {"r": 0, "g": 0, "b": 255, "speed": 2.0, "tail": 8}),
     ("meteor",     {"r": 255, "g": 200, "b": 100, "speed": 1.0,
