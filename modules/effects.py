@@ -289,13 +289,12 @@ class BeatPulse(Effect):
 # ── GPT schema ─────────────────────────────────────────────────────────────────
 
 EFFECT_NAMES = Literal[
-    "solid", "color_wave", "pulse", "rainbow", "chase",
-    "meteor", "twinkle", "plasma", "larson", "palette_wave", "beat_pulse",
+    "pulse", "rainbow", "chase", "twinkle", "plasma", "palette_wave", "beat_pulse",
 ]
 
 
 class FilterCommand(BaseModel):
-    type: Literal["gamma", "mirror", "reverse", "dim"]
+    type: Literal["dim"]
     params: dict[str, Any] = {}
 
 
@@ -320,33 +319,24 @@ class SequenceCommand(BaseModel):
 
 
 class VJResponse(BaseModel):
-    type: Literal["effect", "sequences"]
-    effect: EffectCommand | None = None
-    sequences: list[SequenceCommand] = []
+    sequences: list[SequenceCommand]
     bpm: float | None = None
 
 
 # ── Registries & factory ───────────────────────────────────────────────────────
 
 EFFECT_REGISTRY: dict[str, type[Effect]] = {
-    "solid":        SolidColor,
-    "color_wave":   ColorWave,
     "pulse":        Pulse,
     "rainbow":      Rainbow,
     "chase":        Chase,
-    "meteor":       Meteor,
     "twinkle":      Twinkle,
     "plasma":       Plasma,
-    "larson":       Larson,
     "palette_wave": PaletteWave,
     "beat_pulse":   BeatPulse,
 }
 
 FILTER_REGISTRY: dict[str, type[Filter]] = {
-    "gamma":   GammaFilter,
-    "mirror":  MirrorFilter,
-    "reverse": ReverseFilter,
-    "dim":     DimFilter,
+    "dim": DimFilter,
 }
 
 

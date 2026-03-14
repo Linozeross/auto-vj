@@ -11,6 +11,8 @@ from modules.effects import (
     # Schema
     EffectCommand, FilterCommand,
 )
+# Note: SolidColor, ColorWave, Meteor, Larson and GammaFilter/MirrorFilter/ReverseFilter
+# are kept as classes but removed from registries — imported here for class-level tests only.
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -22,31 +24,23 @@ def valid_rgb(color: list[int]) -> bool:
 # ── Registry completeness ─────────────────────────────────────────────────────
 
 def test_all_effects_in_registry():
-    expected = {
-        "solid", "color_wave", "pulse", "rainbow", "chase",
-        "meteor", "twinkle", "plasma", "larson", "palette_wave", "beat_pulse",
-    }
+    expected = {"pulse", "rainbow", "chase", "twinkle", "plasma", "palette_wave", "beat_pulse"}
     assert set(EFFECT_REGISTRY.keys()) == expected
 
 
 def test_all_filters_in_registry():
-    assert set(FILTER_REGISTRY.keys()) == {"gamma", "mirror", "reverse", "dim"}
+    assert set(FILTER_REGISTRY.keys()) == {"dim"}
 
 
 # ── All effects produce valid RGB ─────────────────────────────────────────────
 
 @pytest.mark.parametrize("name,params", [
-    ("solid",        {"r": 100, "g": 200, "b": 50}),
-    ("color_wave",   {"speed": 1.5}),
     ("pulse",        {"r": 255, "g": 0, "b": 0, "rate_hz": 2.0}),
     ("pulse",        {"r": 255, "g": 0, "b": 0, "rate": 2.0}),
     ("rainbow",      {"speed": 3.0}),
     ("chase",        {"r": 0, "g": 0, "b": 255, "speed": 2.0, "tail": 8}),
-    ("meteor",       {"r": 255, "g": 200, "b": 100, "speed": 1.0,
-                      "tail_length": 20, "tail_decay": 0.85, "bounce": True}),
     ("twinkle",      {"r": 255, "g": 255, "b": 255, "density": 0.5, "speed": 1.0}),
     ("plasma",       {"speed": 1.0, "scale": 1.0}),
-    ("larson",       {"r": 255, "g": 0, "b": 0, "speed": 1.0, "width": 5}),
     ("palette_wave", {"palette": "ocean", "speed": 1.0}),
     ("beat_pulse",   {"r": 255, "g": 100, "b": 0, "sharpness": 4.0}),
 ])
@@ -179,16 +173,15 @@ def test_mirror_filter_symmetric():
 
 def test_filter_propagates_on_beat():
     base = SolidColor(255, 0, 0)
-    dim = DimFilter(GammaFilter(base, gamma=2.2), brightness=0.8)
+    dim = DimFilter(base, brightness=0.8)
     dim.on_beat(120, 1)  # should not raise
 
 
 # ── effect_from_dict factory ──────────────────────────────────────────────────
 
 def test_effect_from_dict_basic():
-    e = effect_from_dict({"effect": "solid", "params": {"r": 1, "g": 2, "b": 3}})
-    assert isinstance(e, SolidColor)
-    assert e.get_color(0, 0, 1) == [1, 2, 3]
+    e = effect_from_dict({"effect": "pulse", "params": {"r": 255, "g": 0, "b": 0}})
+    assert isinstance(e, Pulse)
 
 
 def test_effect_from_dict_with_filters():
@@ -196,7 +189,6 @@ def test_effect_from_dict_with_filters():
         "effect": "rainbow",
         "params": {"speed": 1.0},
         "filters": [
-            {"type": "gamma", "params": {"gamma": 2.2}},
             {"type": "dim", "params": {"brightness": 0.5}},
         ],
     })
@@ -229,12 +221,12 @@ def test_effect_command_with_filters():
     cmd = EffectCommand(
         effect="pulse",
         params={"r": 255, "g": 0, "b": 0},
-        filters=[FilterCommand(type="gamma", params={"gamma": 2.2})],
+        filters=[FilterCommand(type="dim", params={"brightness": 0.5})],
         bpm=128.0,
     )
     assert cmd.effect == "pulse"
     assert cmd.bpm == 128.0
-    assert cmd.filters[0].type == "gamma"
+    assert cmd.filters[0].type == "dim"
 
 
 def test_filter_command_invalid_type():

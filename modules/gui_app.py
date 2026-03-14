@@ -24,7 +24,7 @@ import traceback
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QKeyEvent, QAction
+from PyQt6.QtGui import QKeyEvent, QAction, QPainter, QColor, QPen, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QDial,
@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 )
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import ValidationError
 
 import numpy as np
 import sounddevice as sd
@@ -49,7 +50,7 @@ from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
 from modules.effects import VJResponse
-from modules.recorder import SAMPLE_RATE, CHANNELS, transcribe
+from modules.recorder import SAMPLE_RATE, CHANNELS, audio_to_wav_b64
 from modules.sequences import Sequence, sequence_from_dict, sequence_from_effect_cmd, PHRASE_BEATS
 
 load_dotenv()
@@ -73,6 +74,9 @@ KNOB_STEPS = 1000
 
 TAP_RESET_GAP_SECS = 2.0
 
+QUEUE_WIDGET_HEIGHT = 52
+QUEUE_ITEM_WIDTH = 72
+
 SYSTEM_PROMPT = open("system_prompt.txt").read().strip()
 
 # Effects that use "rate" instead of "speed"
@@ -87,15 +91,11 @@ STATE_COLORS: dict[str, str] = {
 }
 
 EFFECT_COLORS: dict[str, str] = {
-    "solid":        "#cccccc",
-    "color_wave":   "#00d4d4",
     "pulse":        "#cc44cc",
     "rainbow":      "#d4c040",
     "chase":        "#40c860",
-    "meteor":       "#e0e0e0",
     "twinkle":      "#60e0e0",
     "plasma":       "#d060e0",
-    "larson":       "#e04040",
     "palette_wave": "#e08020",
     "beat_pulse":   "#d09000",
 }
@@ -186,16 +186,21 @@ def _record_gui(stop_event: threading.Event,
     return np.concatenate(frames, axis=0)
 
 
-def _chat_to_response(text: str, history: list[dict], client: OpenAI) -> tuple[VJResponse, list[dict]]:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": text}]
+def _chat_to_response(audio: np.ndarray, history: list[dict], client: OpenAI) -> tuple[VJResponse, list[dict]]:
+    b64 = audio_to_wav_b64(audio)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+        {"role": "user", "content": [
+            {"type": "input_audio", "input_audio": {"data": b64, "format": "wav"}},
+        ]},
+    ]
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o-audio-preview",
+        modalities=["text"],
         messages=messages,
-        response_format={"type": "json_object"},
     )
     raw = response.choices[0].message.content
     new_history = history + [
-        {"role": "user", "content": text},
+        {"role": "user", "content": "[voice command]"},
         {"role": "assistant", "content": raw},
     ]
     vj_response = VJResponse.model_validate(json.loads(raw))
@@ -357,30 +362,21 @@ class VJWorker(QThread):
             if audio.size == 0:
                 continue
 
-            self.status_changed.emit("TRANSCRIBING")
-            text = await asyncio.to_thread(transcribe, audio, self._client)
-            if not text.strip():
-                continue
-
             self.status_changed.emit("THINKING")
-            vj_response, self._history = await asyncio.to_thread(
-                _chat_to_response, text, self._history, self._client
-            )
+            try:
+                vj_response, self._history = await asyncio.to_thread(
+                    _chat_to_response, audio, self._history, self._client
+                )
+            except (ValidationError, ValueError) as exc:
+                print(f"[auto-vj] GPT response rejected: {exc}", file=sys.stderr)
+                continue
 
             if vj_response.bpm is not None:
                 bpm = float(vj_response.bpm)
                 self._link_clock.set_bpm(bpm)
                 self.bpm_changed.emit(bpm)
 
-            if vj_response.type == "effect" and vj_response.effect is not None:
-                cmd = vj_response.effect.model_dump()
-                seq = sequence_from_effect_cmd(cmd)
-                await self._enqueue_async(seq)
-                self._current_cmd = cmd
-                self.status_changed.emit("LIVE")
-                self.effect_activated.emit(text, cmd)
-
-            elif vj_response.type == "sequences" and vj_response.sequences:
+            if vj_response.sequences:
                 for s in vj_response.sequences:
                     await self._enqueue_async(sequence_from_dict(s.model_dump()))
                 first_step = vj_response.sequences[0].steps[0]
@@ -388,7 +384,7 @@ class VJWorker(QThread):
                        "filters": [f.model_dump() for f in first_step.filters]}
                 self._current_cmd = cmd
                 self.status_changed.emit("LIVE")
-                self.effect_activated.emit(text, cmd)
+                self.effect_activated.emit("[voice command]", cmd)
 
     # ── Thread-safe calls from Qt ──────────────────────────────────────────────
 
@@ -468,6 +464,30 @@ class VJWorker(QThread):
     @property
     def current_cmd(self) -> dict | None:
         return self._current_cmd
+
+    def get_queue_snapshot(self) -> dict:
+        """Thread-safe snapshot of queue state for UI polling (GIL protects simple reads)."""
+        current_name = ""
+        current_effect = ""
+        phrase_phase = 0.0
+
+        if self._seq_current is not None:
+            current_name = self._seq_current.name or ""
+            current_effect = current_name
+
+        if self._link_clock is not None:
+            beat_number = self._link_clock._beat_number
+            beat_frac = self._link_clock.beat_phase()
+            phrase_phase = ((beat_number % PHRASE_BEATS) + beat_frac) / PHRASE_BEATS
+
+        queue_items = [{"name": seq.name or "", "effect": seq.name or ""} for seq in self._seq_queue]
+
+        return {
+            "current_name": current_name,
+            "current_effect": current_effect,
+            "phrase_phase": phrase_phase,
+            "queue": queue_items,
+        }
 
 
 # ── KnobWidget ─────────────────────────────────────────────────────────────────
@@ -580,6 +600,103 @@ class PresetButton(QPushButton):
             menu.exec(event.globalPos())
 
 
+# ── SequenceQueueWidget ────────────────────────────────────────────────────────
+
+class SequenceQueueWidget(QWidget):
+    """DJ-style timeline showing current sequence progress + queued sequences."""
+
+    def __init__(self, worker: "VJWorker", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._worker = worker
+        self.setFixedHeight(QUEUE_WIDGET_HEIGHT)
+        self.setMinimumWidth(200)
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)
+        self._timer.timeout.connect(self.update)
+        self._timer.start()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        snap = self._worker.get_queue_snapshot()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        w = self.width()
+        h = self.height()
+        MARGIN = 4
+        GAP = 4
+
+        queue = snap["queue"]
+        n_queue = len(queue)
+        queue_total = n_queue * (QUEUE_ITEM_WIDTH + GAP) if n_queue else 0
+        current_w = max(100, w - MARGIN * 2 - queue_total - (GAP if n_queue else 0))
+
+        block_x = MARGIN
+        block_y = MARGIN
+        block_h = h - MARGIN * 2
+
+        current_name = snap["current_name"]
+        current_effect = snap["current_effect"]
+        phrase_phase = snap["phrase_phase"]
+
+        if current_name:
+            color_hex = EFFECT_COLORS.get(current_effect, "#888888")
+            base_color = QColor(color_hex)
+
+            playhead_x = block_x + int(current_w * phrase_phase)
+
+            # Played region
+            played = QColor(base_color)
+            played.setAlpha(80)
+            painter.fillRect(block_x, block_y, max(0, playhead_x - block_x), block_h, played)
+
+            # Remaining region
+            remain = QColor(base_color)
+            remain.setAlpha(30)
+            painter.fillRect(playhead_x, block_y, current_w - (playhead_x - block_x), block_h, remain)
+
+            # Border
+            painter.setPen(QPen(QColor(color_hex), 1))
+            painter.drawRect(block_x, block_y, current_w - 1, block_h - 1)
+
+            # Playhead
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.drawLine(playhead_x, block_y, playhead_x, block_y + block_h - 1)
+
+            # Label
+            painter.setPen(QColor(color_hex))
+            painter.setFont(QFont(_MONO_FONT, 10, QFont.Weight.Bold))
+            painter.drawText(block_x + 6, block_y, current_w - 12, block_h,
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             current_name)
+        else:
+            painter.fillRect(block_x, block_y, current_w, block_h, QColor("#111111"))
+            painter.setPen(QPen(QColor("#222222"), 1))
+            painter.drawRect(block_x, block_y, current_w - 1, block_h - 1)
+
+        # Queue items
+        x = block_x + current_w + GAP
+        for item in queue:
+            effect = item["effect"]
+            name = item["name"] or effect
+            color_hex = EFFECT_COLORS.get(effect, "#888888")
+
+            fill = QColor(color_hex)
+            fill.setAlpha(120)
+            painter.fillRect(x, block_y, QUEUE_ITEM_WIDTH, block_h, fill)
+
+            painter.setPen(QPen(QColor(color_hex), 1))
+            painter.drawRect(x, block_y, QUEUE_ITEM_WIDTH - 1, block_h - 1)
+
+            painter.setPen(QColor("#dddddd"))
+            painter.setFont(QFont(_MONO_FONT, 9))
+            painter.drawText(x + 4, block_y, QUEUE_ITEM_WIDTH - 8, block_h,
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             name[:8])
+            x += QUEUE_ITEM_WIDTH + GAP
+
+        painter.end()
+
+
 # ── Main window ────────────────────────────────────────────────────────────────
 
 class VJMainWindow(QMainWindow):
@@ -602,6 +719,7 @@ class VJMainWindow(QMainWindow):
 
         root.addLayout(self._build_status_bar())
         root.addWidget(self._build_effect_box())
+        root.addWidget(self._build_queue_box())
         root.addWidget(self._build_controls_box())
         root.addWidget(self._build_presets_box())
 
@@ -680,10 +798,15 @@ class VJMainWindow(QMainWindow):
         self._effect_label = QLabel("—")
         self._effect_label.setStyleSheet("color: #666; font-size: 11px;")
         self._effect_label.setWordWrap(True)
-        self._queue_label = QLabel("")
-        self._queue_label.setStyleSheet("color: #333; font-size: 10px;")
         layout.addWidget(self._effect_label)
-        layout.addWidget(self._queue_label)
+        return box
+
+    def _build_queue_box(self) -> QGroupBox:
+        box = QGroupBox("QUEUE")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 10, 8, 6)
+        self._queue_widget = SequenceQueueWidget(self._worker)
+        layout.addWidget(self._queue_widget)
         return box
 
     def _build_controls_box(self) -> QGroupBox:
@@ -763,10 +886,7 @@ class VJMainWindow(QMainWindow):
                 self._knob_brightness.set_value(float(f.get("params", {}).get("brightness", 1.0)))
 
     def _on_queue_status(self, queue_length: int) -> None:
-        if queue_length > 0:
-            self._queue_label.setText(f"{queue_length} queued")
-        else:
-            self._queue_label.setText("")
+        pass  # queue widget self-updates via its 50ms timer
 
     def _on_bpm(self, bpm: float) -> None:
         self._bpm_label.setText(f"BPM: {bpm:.1f}")
