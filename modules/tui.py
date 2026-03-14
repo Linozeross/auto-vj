@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -13,7 +14,8 @@ from textual.widgets import DataTable, Footer, Header, Label, Static
 from textual.containers import Horizontal, Vertical
 
 from modules.artnet_renderer import ArtNetRenderer
-from modules.bpm import LinkClock
+from modules.beat_detector import MicBeatDetector
+from modules.bpm import BpmMode, LinkClock
 from modules.effects import effect_from_dict
 from modules.recorder import record_until_release, transcribe
 
@@ -22,6 +24,7 @@ load_dotenv()
 ARTNET_IP = os.environ.get("ARTNET_IP", "192.168.178.102")
 LED_COUNT = int(os.environ.get("LED_COUNT", "100"))
 SYSTEM_PROMPT = open("system_prompt.txt").read().strip()
+TAP_RESET_GAP_SECS = 2.0   # reset tap history if gap between taps exceeds this
 
 # ── State colours ──────────────────────────────────────────────────────────────
 STATE_STYLES: dict[str, str] = {
@@ -72,6 +75,12 @@ class LinkStatusChanged(Message):
         super().__init__()
         self.tempo = tempo
         self.peers = peers
+
+
+class BpmModeChanged(Message):
+    def __init__(self, mode: BpmMode) -> None:
+        super().__init__()
+        self.mode = mode
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -140,6 +149,11 @@ class VJApp(App):
         color: $success;
     }
 
+    #mode-label {
+        margin-top: 1;
+        color: $text-muted;
+    }
+
     DataTable {
         height: 1fr;
     }
@@ -147,6 +161,8 @@ class VJApp(App):
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", priority=True),
+        Binding("m", "cycle_bpm_mode", "BPM mode", priority=False),
+        Binding("enter", "tap_beat", "Tap beat", priority=True),
     ]
 
     def compose(self) -> ComposeResult:
@@ -161,12 +177,16 @@ class VJApp(App):
                 yield Static("[dim]No effect yet[/]", id="effect-label")
                 yield Static("[dim]BPM: —[/]", id="bpm-label")
                 yield Static("[dim]Link: —[/]", id="link-label")
+                yield Static("[dim]Mode: link  (m to cycle)[/]", id="mode-label")
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#history", DataTable)
         table.add_columns("Prompt", "Effect", "Params")
         table.cursor_type = "row"
+
+        self._bpm_mode: BpmMode = BpmMode.LINK
+        self._tap_times: list[float] = []
 
         client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
         self._link_clock = LinkClock()
@@ -181,6 +201,12 @@ class VJApp(App):
         self._link_clock.set_num_peers_callback(_on_peers)
         self._link_clock.start()
 
+        def _on_mic_bpm(bpm: float) -> None:
+            self._link_clock.set_bpm(bpm)
+            self.post_message(BpmChanged(bpm))
+
+        self._beat_detector = MicBeatDetector(on_bpm=_on_mic_bpm)
+
         renderer = ArtNetRenderer(ARTNET_IP, LED_COUNT, link_clock=self._link_clock)
 
         self.run_worker(self._ptt_loop(renderer, client), exclusive=False)
@@ -191,10 +217,22 @@ class VJApp(App):
 
         while True:
             self.post_message(StatusChanged("WAITING"))
-            audio = await asyncio.to_thread(record_until_release)
+
+            def _on_recording_start() -> None:
+                if self._bpm_mode is BpmMode.MIC:
+                    self._beat_detector.pause()
+
+            audio = await asyncio.to_thread(record_until_release, _on_recording_start)
+            if self._bpm_mode is BpmMode.MIC:
+                self._beat_detector.resume()
+
+            if audio.size == 0:
+                continue
 
             self.post_message(StatusChanged("TRANSCRIBING"))
             text = await asyncio.to_thread(transcribe, audio, client)
+            if not text.strip():
+                continue
 
             self.post_message(StatusChanged("THINKING"))
             cmd, history = await asyncio.to_thread(_chat_to_effect, text, history, client)
@@ -233,6 +271,50 @@ class VJApp(App):
     def on_link_status_changed(self, msg: LinkStatusChanged) -> None:
         peers_str = f"{msg.peers} peer{'s' if msg.peers != 1 else ''}" if msg.peers else "solo"
         self.query_one("#link-label", Static).update(f"[bold]Link: {msg.tempo:.1f} BPM  [{peers_str}][/]")
+
+    def on_bpm_mode_changed(self, msg: BpmModeChanged) -> None:
+        self.query_one("#mode-label", Static).update(
+            f"[dim]Mode: [bold]{msg.mode.value}[/bold]  (m to cycle)[/]"
+        )
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "tap_beat":
+            return self._bpm_mode is BpmMode.TAP
+        return True
+
+    # ── actions ────────────────────────────────────────────────────────────────
+
+    def action_cycle_bpm_mode(self) -> None:
+        order = [BpmMode.LINK, BpmMode.TAP, BpmMode.MIC]
+        next_mode = order[(order.index(self._bpm_mode) + 1) % len(order)]
+
+        # Stop mic detector when leaving MIC mode
+        if self._bpm_mode is BpmMode.MIC:
+            self._beat_detector.stop()
+
+        self._bpm_mode = next_mode
+        self._tap_times = []
+
+        # Start mic detector when entering MIC mode
+        if self._bpm_mode is BpmMode.MIC:
+            self._beat_detector.start()
+
+        self.post_message(BpmModeChanged(next_mode))
+
+    def action_tap_beat(self) -> None:
+        if self._bpm_mode is not BpmMode.TAP:
+            return
+        now = time.monotonic()
+        # Reset if the user paused for more than 2 seconds since the last tap
+        if self._tap_times and now - self._tap_times[-1] > TAP_RESET_GAP_SECS:
+            self._tap_times = []
+        self._tap_times.append(now)
+        if len(self._tap_times) < 2:
+            return
+        intervals = [self._tap_times[i+1] - self._tap_times[i] for i in range(len(self._tap_times)-1)]
+        bpm = 60.0 / (sum(intervals) / len(intervals))
+        self._link_clock.set_bpm(bpm)
+        self.post_message(BpmChanged(bpm))
 
 
 # ── GPT helper (runs in thread) ────────────────────────────────────────────────

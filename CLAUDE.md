@@ -30,6 +30,10 @@ uv run python test_link.py
 
 Copy `.env.example` to `.env` and fill in all three vars before running.
 
+## Code style
+
+**Named constants for all magic values**: any literal number or string used in logic must be extracted into a named constant at the top of the file (or module level). Do not inline magic values in functions or conditions. Example: `TAP_RESET_GAP_SECS = 2.0` used as `if gap > TAP_RESET_GAP_SECS`, never `if gap > 2.0`.
+
 ## Architecture
 
 ```

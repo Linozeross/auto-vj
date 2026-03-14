@@ -1,9 +1,16 @@
 import asyncio
+from enum import Enum
 from typing import Callable
 
 import aalink
 
 from modules.effects import Effect
+
+
+class BpmMode(Enum):
+    LINK = "link"
+    TAP  = "tap"
+    MIC  = "mic"
 
 
 class LinkClock:
