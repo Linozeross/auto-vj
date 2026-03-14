@@ -6,6 +6,20 @@ from modules.effects import Effect, SolidColor
 LEDS_PER_UNIVERSE = 170
 
 
+class MultiRenderer:
+    """Fan-out wrapper: broadcasts the same effect to multiple ArtNetRenderer instances."""
+
+    def __init__(self, renderers: list["ArtNetRenderer"]) -> None:
+        self._renderers = renderers
+
+    def set_effect(self, effect: Effect) -> None:
+        for r in self._renderers:
+            r.set_effect(effect)
+
+    async def render_loop(self) -> None:
+        await asyncio.gather(*(r.render_loop() for r in self._renderers))
+
+
 class ArtNetRenderer:
     def __init__(self, ip: str, total_leds: int, fps: int = 100, link_clock=None):
         self._ip = ip

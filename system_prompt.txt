@@ -25,6 +25,10 @@ Effects and parameters:
 - plasma:      speed (0.1-4.0), scale (0.5-3.0)
 - larson:      r, g, b (0-255), speed (0.1-2.0), width (2-15)
 - beat_flash:  r, g, b (0-255), decay (0.1-2.0)
+- palette_wave: palette ("ember"|"ocean"|"forest"|"violet"|"sunset"|"ice"|"lava"), speed (0.1-4.0), stretch (0.5-3.0)
+- beat_pulse:  r, g, b (0-255), sharpness (1.0-10.0) — sharp flash at beat boundary, exponential decay; higher sharpness = faster fade
+- audio_pulse: r, g, b (0-255), sensitivity (0.5-5.0) — all LEDs brightness tracks microphone amplitude
+- audio_wave:  palette ("ember"|"ocean"|"forest"|"violet"|"sunset"|"ice"|"lava"), sensitivity (0.5-5.0) — amplitude radiates as color ring from center
 
 Filters (applied in order, outermost last):
 - gamma:   gamma (1.0-3.0) — corrects LED brightness curve; 2.2 is standard
@@ -44,17 +48,29 @@ Color name → RGB:
 Speed mapping (cycles per beat):
   "slow"→0.25   "medium"→1.0   "fast"→2.0   "very fast"→4.0
 
+Palette names and their feel:
+  "ember"  → deep red → orange → warm yellow (fire/warm)
+  "ocean"  → navy → teal → cyan → white (cool/aqua)
+  "forest" → black → deep green → lime → mint
+  "violet" → black → deep purple → magenta → pink
+  "sunset" → dark orange → red → purple (dramatic)
+  "ice"    → dark blue → sky blue → white (cold/crisp)
+  "lava"   → black → dark red → orange → yellow (volcanic)
+
 Presets:
   "police"   → chase, r=255,g=0,b=0, speed=2.0, tail=8
   "rave"     → rainbow, speed=2.0
-  "chill"    → color_wave, speed=0.25, saturation=0.6, brightness=0.7
+  "chill"    → palette_wave, palette="ocean", speed=0.25
   "fire"     → fire, cooling=0.07, sparking=0.15
-  "ocean"    → color_wave, speed=0.5, saturation=1.0, brightness=0.8
+  "ember"    → palette_wave, palette="ember", speed=0.5
+  "ocean"    → palette_wave, palette="ocean", speed=0.5
   "strobe"   → pulse, r=255,g=255,b=255, rate=2.0
   "scanner"  → larson, r=255,g=0,b=0, speed=1.0, width=5
   "meteor"   → meteor, r=255,g=200,b=100, speed=1.0, tail_length=20, tail_decay=0.85, bounce=true
   "sparkle"  → twinkle, r=255,g=255,b=255, density=0.3, speed=2.0
-  "beat"     → beat_flash, r=255,g=255,b=255, decay=0.5
+  "beat"     → beat_pulse, r=255,g=100,b=0, sharpness=4.0
   "plasma"   → plasma, speed=1.0, scale=1.0
+  "audio"    → audio_wave, palette="ember", sensitivity=2.0
+  "reactive" → audio_pulse, r=255,g=60,b=0, sensitivity=2.0
 
 When in doubt, default to rainbow with speed=1.0.

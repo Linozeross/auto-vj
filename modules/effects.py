@@ -3,8 +3,50 @@ import random
 import time
 import colorsys
 from abc import ABC, abstractmethod
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from pydantic import BaseModel
+
+
+# ── Audio level source (injected from tui.py) ──────────────────────────────────
+
+_audio_level_fn: Callable[[], float] = lambda: 0.0
+
+
+def set_audio_level_source(fn: Callable[[], float]) -> None:
+    global _audio_level_fn
+    _audio_level_fn = fn
+
+
+# ── Color palettes ─────────────────────────────────────────────────────────────
+
+# Each palette is a list of (r, g, b) waypoints interpolated by _palette_color().
+PALETTES: dict[str, list[tuple[int, int, int]]] = {
+    "ember":   [(0, 0, 0), (120, 0, 0), (255, 50, 0), (255, 160, 20), (255, 240, 160)],
+    "ocean":   [(0, 0, 20), (0, 20, 80), (0, 90, 180), (0, 190, 220), (180, 240, 255)],
+    "forest":  [(0, 10, 0), (0, 60, 10), (10, 140, 20), (80, 210, 40), (190, 255, 140)],
+    "violet":  [(10, 0, 20), (70, 0, 120), (180, 0, 190), (220, 80, 210), (255, 200, 255)],
+    "sunset":  [(20, 0, 5), (180, 20, 0), (255, 70, 0), (255, 150, 60), (180, 80, 180)],
+    "ice":     [(0, 0, 40), (0, 50, 140), (60, 150, 220), (160, 215, 255), (255, 255, 255)],
+    "lava":    [(0, 0, 0), (90, 0, 0), (200, 0, 0), (255, 80, 0), (255, 210, 0)],
+}
+
+
+def _palette_color(palette: list[tuple[int, int, int]], pos: float) -> list[int]:
+    """Linearly interpolate along a palette. pos: 0.0 → 1.0."""
+    pos = max(0.0, min(1.0, pos))
+    n = len(palette) - 1
+    scaled = pos * n
+    idx = int(scaled)
+    frac = scaled - idx
+    if idx >= n:
+        return list(palette[-1])
+    r1, g1, b1 = palette[idx]
+    r2, g2, b2 = palette[idx + 1]
+    return [
+        int(r1 + (r2 - r1) * frac),
+        int(g1 + (g2 - g1) * frac),
+        int(b1 + (b2 - b1) * frac),
+    ]
 
 
 # ── Base classes ───────────────────────────────────────────────────────────────
@@ -298,6 +340,81 @@ class BeatFlash(Effect):
         return [int(self.r * brightness), int(self.g * brightness), int(self.b * brightness)]
 
 
+# ── Palette & beat & audio effects ────────────────────────────────────────────
+
+class PaletteWave(Effect):
+    """Scrolls a named color palette along the strip — no harsh primaries."""
+    def __init__(self, palette: str = "ember", speed: float = 1.0,
+                 stretch: float = 1.0, **_):
+        self._palette = PALETTES.get(palette, PALETTES["ember"])
+        self.speed = float(speed)
+        self.stretch = float(stretch)  # > 1 = wider gradient repeat
+
+    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
+        pos = (led_index / total_leds * self.stretch + t * self.speed) % 1.0
+        return _palette_color(self._palette, pos)
+
+
+class BeatPulse(Effect):
+    """
+    Sharp flash at beat boundary (t % 1.0 == 0) with exponential decay until
+    next beat — fully driven by beat-time t, no wall-clock drift.
+    """
+    BEAT_SHARPNESS_DEFAULT = 4.0
+
+    def __init__(self, r: int = 255, g: int = 100, b: int = 0,
+                 sharpness: float = BEAT_SHARPNESS_DEFAULT, **_):
+        self.r = int(r)
+        self.g = int(g)
+        self.b = int(b)
+        self.sharpness = float(sharpness)  # higher = faster decay within beat
+
+    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
+        phase = t % 1.0  # 0.0 at beat, 1.0 just before next beat
+        brightness = math.exp(-self.sharpness * phase)
+        return [int(self.r * brightness), int(self.g * brightness), int(self.b * brightness)]
+
+
+class AudioPulse(Effect):
+    """All LEDs scale with microphone amplitude — reacts to bass hits and vocals."""
+    AUDIO_SENSITIVITY_DEFAULT = 2.0
+
+    def __init__(self, r: int = 255, g: int = 60, b: int = 0,
+                 sensitivity: float = AUDIO_SENSITIVITY_DEFAULT, **_):
+        self.r = int(r)
+        self.g = int(g)
+        self.b = int(b)
+        self.sensitivity = float(sensitivity)
+
+    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
+        level = min(1.0, _audio_level_fn() * self.sensitivity)
+        return [int(self.r * level), int(self.g * level), int(self.b * level)]
+
+
+class AudioWave(Effect):
+    """
+    Audio amplitude radiates outward from strip center as a colored ring.
+    Uses a named palette so colors stay rich.
+    """
+    AUDIO_SENSITIVITY_DEFAULT = 2.0
+
+    def __init__(self, palette: str = "ember",
+                 sensitivity: float = AUDIO_SENSITIVITY_DEFAULT, **_):
+        self._palette = PALETTES.get(palette, PALETTES["ember"])
+        self.sensitivity = float(sensitivity)
+
+    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
+        level = min(1.0, _audio_level_fn() * self.sensitivity)
+        center = total_leds / 2.0
+        dist = abs(led_index - center) / center  # 0 at center, 1 at edges
+        # light up from center outward proportional to level
+        if dist > level:
+            return [0, 0, 0]
+        brightness = 1.0 - (dist / max(level, 1e-4))
+        color = _palette_color(self._palette, dist)
+        return [int(c * brightness) for c in color]
+
+
 # ── GPT schema ─────────────────────────────────────────────────────────────────
 
 class FilterCommand(BaseModel):
@@ -309,6 +426,7 @@ class EffectCommand(BaseModel):
     effect: Literal[
         "solid", "color_wave", "pulse", "rainbow", "chase",
         "meteor", "twinkle", "fire", "plasma", "larson", "beat_flash",
+        "palette_wave", "beat_pulse", "audio_pulse", "audio_wave",
     ]
     params: dict[str, Any] = {}
     filters: list[FilterCommand] = []
@@ -318,17 +436,21 @@ class EffectCommand(BaseModel):
 # ── Registries & factory ───────────────────────────────────────────────────────
 
 EFFECT_REGISTRY: dict[str, type[Effect]] = {
-    "solid":       SolidColor,
-    "color_wave":  ColorWave,
-    "pulse":       Pulse,
-    "rainbow":     Rainbow,
-    "chase":       Chase,
-    "meteor":      Meteor,
-    "twinkle":     Twinkle,
-    "fire":        Fire,
-    "plasma":      Plasma,
-    "larson":      Larson,
-    "beat_flash":  BeatFlash,
+    "solid":        SolidColor,
+    "color_wave":   ColorWave,
+    "pulse":        Pulse,
+    "rainbow":      Rainbow,
+    "chase":        Chase,
+    "meteor":       Meteor,
+    "twinkle":      Twinkle,
+    "fire":         Fire,
+    "plasma":       Plasma,
+    "larson":       Larson,
+    "beat_flash":   BeatFlash,
+    "palette_wave": PaletteWave,
+    "beat_pulse":   BeatPulse,
+    "audio_pulse":  AudioPulse,
+    "audio_wave":   AudioWave,
 }
 
 FILTER_REGISTRY: dict[str, type[Filter]] = {

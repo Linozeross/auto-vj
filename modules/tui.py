@@ -13,16 +13,34 @@ from textual.message import Message
 from textual.widgets import DataTable, Footer, Header, Label, Static
 from textual.containers import Horizontal, Vertical
 
-from modules.artnet_renderer import ArtNetRenderer
+from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
+from modules.audio_level import AudioLevel
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
-from modules.effects import effect_from_dict
+from modules.effects import effect_from_dict, set_audio_level_source
 from modules.recorder import record_until_release, transcribe
 
 load_dotenv()
 
 ARTNET_IP = os.environ.get("ARTNET_IP", "192.168.178.102")
 LED_COUNT = int(os.environ.get("LED_COUNT", "100"))
+# Comma-separated list of ip:led_count pairs, e.g. "192.168.178.102:100,192.168.178.114:60"
+# Falls back to ARTNET_IP + LED_COUNT when not set.
+ARTNET_NODES_RAW = os.environ.get("ARTNET_NODES", "")
+
+
+def _parse_artnet_nodes(raw: str) -> list[tuple[str, int]]:
+    if raw.strip():
+        nodes = []
+        for part in raw.split(","):
+            part = part.strip()
+            if ":" in part:
+                ip, count = part.rsplit(":", 1)
+                nodes.append((ip.strip(), int(count)))
+            else:
+                nodes.append((part, LED_COUNT))
+        return nodes
+    return [(ARTNET_IP, LED_COUNT)]
 SYSTEM_PROMPT = open("system_prompt.txt").read().strip()
 TAP_RESET_GAP_SECS = 2.0   # reset tap history if gap between taps exceeds this
 
@@ -36,17 +54,21 @@ STATE_STYLES: dict[str, str] = {
 }
 
 EFFECT_COLORS: dict[str, str] = {
-    "solid":       "white",
-    "color_wave":  "cyan",
-    "pulse":       "magenta",
-    "rainbow":     "yellow",
-    "chase":       "green",
-    "meteor":      "bright_white",
-    "twinkle":     "bright_cyan",
-    "fire":        "red",
-    "plasma":      "bright_magenta",
-    "larson":      "bright_red",
-    "beat_flash":  "bright_yellow",
+    "solid":        "white",
+    "color_wave":   "cyan",
+    "pulse":        "magenta",
+    "rainbow":      "yellow",
+    "chase":        "green",
+    "meteor":       "bright_white",
+    "twinkle":      "bright_cyan",
+    "fire":         "red",
+    "plasma":       "bright_magenta",
+    "larson":       "bright_red",
+    "beat_flash":   "bright_yellow",
+    "palette_wave": "orange3",
+    "beat_pulse":   "gold1",
+    "audio_pulse":  "deep_pink2",
+    "audio_wave":   "medium_orchid",
 }
 
 
@@ -207,7 +229,17 @@ class VJApp(App):
 
         self._beat_detector = MicBeatDetector(on_bpm=_on_mic_bpm)
 
-        renderer = ArtNetRenderer(ARTNET_IP, LED_COUNT, link_clock=self._link_clock)
+        # Audio level tracker — runs in LINK/TAP mode; paused in MIC mode to
+        # avoid competing with MicBeatDetector on the same input device.
+        self._audio_level = AudioLevel()
+        self._audio_level.start()
+        set_audio_level_source(lambda: self._audio_level.level)
+
+        nodes = _parse_artnet_nodes(ARTNET_NODES_RAW)
+        renderer = MultiRenderer([
+            ArtNetRenderer(ip, leds, link_clock=self._link_clock)
+            for ip, leds in nodes
+        ])
 
         self.run_worker(self._ptt_loop(renderer, client), exclusive=False)
         self.run_worker(renderer.render_loop(), exclusive=False)
@@ -221,10 +253,14 @@ class VJApp(App):
             def _on_recording_start() -> None:
                 if self._bpm_mode is BpmMode.MIC:
                     self._beat_detector.pause()
+                else:
+                    self._audio_level.pause()
 
             audio = await asyncio.to_thread(record_until_release, _on_recording_start)
             if self._bpm_mode is BpmMode.MIC:
                 self._beat_detector.resume()
+            else:
+                self._audio_level.resume()
 
             if audio.size == 0:
                 continue
@@ -288,15 +324,18 @@ class VJApp(App):
         order = [BpmMode.LINK, BpmMode.TAP, BpmMode.MIC]
         next_mode = order[(order.index(self._bpm_mode) + 1) % len(order)]
 
-        # Stop mic detector when leaving MIC mode
+        # Stop mic detector when leaving MIC mode; restore audio level tracker
         if self._bpm_mode is BpmMode.MIC:
             self._beat_detector.stop()
+            self._audio_level.resume()
 
         self._bpm_mode = next_mode
         self._tap_times = []
 
-        # Start mic detector when entering MIC mode
+        # Start mic detector when entering MIC mode; pause audio level to avoid
+        # competing for the same input device
         if self._bpm_mode is BpmMode.MIC:
+            self._audio_level.pause()
             self._beat_detector.start()
 
         self.post_message(BpmModeChanged(next_mode))
