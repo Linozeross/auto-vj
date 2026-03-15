@@ -39,8 +39,8 @@ COMPARISON_OFFSET = 4            # compare current fingerprint vs N steps ago (�
 NOVELTY_EMA_ALPHA = 0.35         # EMA weight for new novelty values (lower = smoother)
 NOVELTY_THRESHOLD = 0.15         # smoothed novelty threshold → change detected
 NOVELTY_DISPLAY_MAX = NOVELTY_THRESHOLD * 2  # novelty value that fills the bar (0.30)
-MIN_CHANGE_SPACING_BEATS = 8     # cooldown: ignore changes closer than this
-PHRASE_CANDIDATES = [16, 32, 64] # valid EDM phrase lengths in beats
+MIN_CHANGE_SPACING_BEATS = 6     # cooldown: ignore changes closer than this (must be < smallest phrase candidate)
+PHRASE_CANDIDATES = [8, 16, 32, 64] # valid EDM phrase lengths in beats
 MAX_CHANGE_HISTORY = 8           # change events used for period inference
 CONFIDENCE_REQUIRED_RATIO = 0.6  # fraction of intervals that must agree
 
@@ -56,6 +56,7 @@ class StructureEstimate:
     beats_since_change: float      # beats since last detected change
     novelty: float                 # current novelty score 0.0–1.0
     confidence: float              # 0.0–1.0 (consistency of detected changes)
+    next_change_beat: float | None = None  # absolute beat position of next change (= current_beat + beats_to_change)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -279,12 +280,15 @@ class DropEstimator:
 
         _, confidence = _infer_period(self._change_beats)
 
+        next_change_beat = (current_beat + beats_to_change) if beats_to_change is not None else None
+
         estimate = StructureEstimate(
             beats_to_change=beats_to_change,
             change_period=self._change_period,
             beats_since_change=beats_since_change,
             novelty=self._smoothed_novelty,
             confidence=confidence,
+            next_change_beat=next_change_beat,
         )
         with self._estimate_lock:
             self._last_estimate = estimate

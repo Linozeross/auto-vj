@@ -84,6 +84,9 @@ QUEUE_LOOP_GAP = 2
 SYSTEM_PROMPT = open("system_prompt.txt").read().strip()
 
 AUTO_TRIGGER_AHEAD_BARS = 4      # start generating this many bars before queue runs out
+STRUCTURE_CONFIDENCE_MIN = 0.5   # minimum drop-estimator confidence to use for transition timing
+STRUCTURE_BEATS_WINDOW = 1.0     # advance queue when beats_to_change falls within this many beats
+DROP_MARKER_COLOR = "#ffcc00"    # colour of the predicted-drop marker in the queue widget
 AUTO_PROMPTS = [
     "keep the energy going with something fresh",
     "mix it up — new effect, different vibe",
@@ -309,6 +312,8 @@ class VJWorker(QThread):
         # Auto mode
         self._auto_mode: bool = False
         self._auto_generating: bool = False
+        # Latest structure estimate (written from estimator timer thread, read from asyncio loop)
+        self._last_structure: StructureEstimate | None = None
 
     def run(self) -> None:
         try:
@@ -358,6 +363,7 @@ class VJWorker(QThread):
         self._beat_detector = MicBeatDetector(on_bpm=_on_mic_bpm)
 
         def _on_structure(estimate: StructureEstimate) -> None:
+            self._last_structure = estimate  # GIL-atomic write; read by _queue_watcher
             self.structure_changed.emit(estimate)
 
         self._drop_estimator = DropEstimator(link_clock=self._link_clock)
@@ -407,11 +413,11 @@ class VJWorker(QThread):
             sleep_secs = 60.0 / max(tempo, 20.0) / 4.0
             await asyncio.sleep(sleep_secs)
 
-            # Advance queue at phrase boundaries
+            # Advance queue at phrase boundaries (or at a predicted structural change)
             if self._seq_current is not None and self._seq_queue:
                 seq_t = self._link_clock.beat - self._seq_start_beat
                 beat_number = self._link_clock._beat_number
-                if self._seq_current.is_done(seq_t) and beat_number % PHRASE_BEATS == 0:
+                if self._seq_current.is_done(seq_t) and self._should_advance_queue(beat_number):
                     next_seq = self._seq_queue.pop(0)
                     self._seq_current = next_seq
                     self._seq_start_beat = self._link_clock.beat
@@ -429,10 +435,41 @@ class VJWorker(QThread):
                     remaining_beats = (
                         self._seq_current.total_beats * self._seq_current.repeats - seq_t
                     )
-                    should_trigger = remaining_beats / BEATS_PER_BAR < AUTO_TRIGGER_AHEAD_BARS
+                    should_trigger = self._should_trigger_auto_refill(remaining_beats)
                 if should_trigger:
                     self._auto_generating = True
                     asyncio.ensure_future(self._auto_queue_refill())
+
+    def _should_advance_queue(self, beat_number: int) -> bool:
+        """Return True if it is appropriate to advance the sequence queue now.
+
+        Uses the drop estimator when confident; falls back to phrase-boundary logic.
+        """
+        est = self._last_structure
+        if (est is not None
+                and est.beats_to_change is not None
+                and est.confidence >= STRUCTURE_CONFIDENCE_MIN
+                and est.beats_to_change <= STRUCTURE_BEATS_WINDOW):
+            return True
+        return beat_number % PHRASE_BEATS == 0
+
+    def _should_trigger_auto_refill(self, remaining_beats: float) -> bool:
+        """Return True if auto-refill should start generating now."""
+        if remaining_beats / BEATS_PER_BAR < AUTO_TRIGGER_AHEAD_BARS:
+            return True
+        est = self._last_structure
+        if (est is not None
+                and est.beats_to_change is not None
+                and est.confidence >= STRUCTURE_CONFIDENCE_MIN
+                and est.beats_to_change <= AUTO_TRIGGER_AHEAD_BARS * BEATS_PER_BAR):
+            return True
+        return False
+
+    def get_current_beat(self) -> float:
+        """Thread-safe read of the current Link beat position."""
+        if self._link_clock is None:
+            return 0.0
+        return self._link_clock.beat
 
     async def _auto_queue_refill(self) -> None:
         """Generate a new sequence via text prompt and enqueue it."""
@@ -619,12 +656,28 @@ class VJWorker(QThread):
 
         queue_items = [{"name": seq.name or "", "effect": seq.name or "", "repeats": seq.repeats} for seq in self._seq_queue]
 
+        # Pass drop marker position to the queue widget (None if estimate not confident)
+        next_change_beat = None
+        est = self._last_structure
+        if (est is not None
+                and est.next_change_beat is not None
+                and est.confidence >= STRUCTURE_CONFIDENCE_MIN):
+            next_change_beat = est.next_change_beat
+
+        seq_total_beats = (
+            self._seq_current.total_beats * self._seq_current.repeats
+            if self._seq_current is not None else 0
+        )
+
         return {
             "current_name": current_name,
             "current_effect": current_effect,
             "seq_phase": seq_phase,
             "current_repeats": current_repeats,
             "queue": queue_items,
+            "next_change_beat": next_change_beat,
+            "seq_start_beat": self._seq_start_beat,
+            "seq_total_beats": seq_total_beats,
         }
 
 
@@ -811,6 +864,17 @@ class SequenceQueueWidget(QWidget):
             painter.setPen(QPen(QColor("#00e5ff"), 2))
             painter.drawLine(playhead_x, block_y, playhead_x, block_y + block_h - 1)
 
+            # Drop marker — predicted structural change from the drop estimator
+            next_change_beat = snap.get("next_change_beat")
+            seq_start_beat = snap.get("seq_start_beat", 0.0)
+            seq_total = snap.get("seq_total_beats", 0)
+            if next_change_beat is not None and seq_total > 0:
+                drop_offset = next_change_beat - seq_start_beat
+                if 0 < drop_offset < seq_total:
+                    drop_x = block_x + int(drop_offset / seq_total * current_w)
+                    painter.setPen(QPen(QColor(DROP_MARKER_COLOR), 2, Qt.PenStyle.DotLine))
+                    painter.drawLine(drop_x, block_y, drop_x, block_y + block_h - 1)
+
             # Label
             painter.setPen(QColor(color_hex))
             painter.setFont(QFont(_MONO_FONT, 10, QFont.Weight.Bold))
@@ -903,6 +967,13 @@ class VJMainWindow(QMainWindow):
         self._brightness_timer.setSingleShot(True)
         self._brightness_timer.setInterval(80)
         self._brightness_timer.timeout.connect(self._flush_brightness_knob)
+
+        # Latest structure estimate — updated via signal, countdown recomputed every 50 ms
+        self._last_structure_est: StructureEstimate | None = None
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.setInterval(50)
+        self._countdown_timer.timeout.connect(self._update_countdown)
+        self._countdown_timer.start()
 
         self._knob_speed.value_changed.connect(lambda _: self._speed_timer.start())
         self._knob_brightness.value_changed.connect(lambda _: self._brightness_timer.start())
@@ -1130,28 +1201,7 @@ class VJMainWindow(QMainWindow):
 
     def _on_structure(self, est: object) -> None:
         e: StructureEstimate = est  # type: ignore[assignment]
-
-        # Status bar pill — compact countdown only
-        if e.beats_to_change is not None:
-            pill_color = NOVELTY_COLORS["hot"] if e.novelty >= NOVELTY_THRESHOLD else NOVELTY_COLORS["active"]
-            self._structure_label.setText(f"~{int(e.beats_to_change)}b")
-        else:
-            pill_color = NOVELTY_COLORS["pending"]
-            self._structure_label.setText("~?b")
-        self._structure_label.setStyleSheet(
-            f"QLabel {{ color: {pill_color}; font-size: 10px; letter-spacing: 1px; }}"
-        )
-
-        # Structure box — countdown
-        if e.beats_to_change is not None:
-            cd_color = NOVELTY_COLORS["hot"] if e.novelty >= NOVELTY_THRESHOLD else NOVELTY_COLORS["active"]
-            self._structure_countdown.setText(f"~{int(e.beats_to_change)}b")
-        else:
-            cd_color = NOVELTY_COLORS["pending"]
-            self._structure_countdown.setText("~?b")
-        self._structure_countdown.setStyleSheet(
-            f"color: {cd_color}; font-size: 16px; font-weight: bold; letter-spacing: 2px;"
-        )
+        self._last_structure_est = e  # countdown labels updated by _countdown_timer
 
         # Period + confidence
         if e.change_period is not None:
@@ -1178,6 +1228,25 @@ class VJMainWindow(QMainWindow):
         )
         self._novelty_value.setText(f"{e.novelty:.2f}")
         self._novelty_value.setStyleSheet(f"color: {bar_color}; font-size: 10px; letter-spacing: 1px;")
+
+    def _update_countdown(self) -> None:
+        """Recompute the beats-to-change countdown every 50 ms for smooth display."""
+        e = self._last_structure_est
+        if e is None or e.next_change_beat is None:
+            self._structure_label.setText("~?b")
+            self._structure_countdown.setText("~?b")
+            return
+        beats_left = max(0.0, e.next_change_beat - self._worker.get_current_beat())
+        cd_color = NOVELTY_COLORS["hot"] if e.novelty >= NOVELTY_THRESHOLD else NOVELTY_COLORS["active"]
+        text = f"~{int(beats_left)}b"
+        self._structure_label.setText(text)
+        self._structure_label.setStyleSheet(
+            f"QLabel {{ color: {cd_color}; font-size: 10px; letter-spacing: 1px; }}"
+        )
+        self._structure_countdown.setText(text)
+        self._structure_countdown.setStyleSheet(
+            f"color: {cd_color}; font-size: 16px; font-weight: bold; letter-spacing: 2px;"
+        )
 
     def _on_worker_error(self, msg: str) -> None:
         self._apply_state_style("WAITING")
