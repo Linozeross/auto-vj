@@ -62,6 +62,23 @@ def test_compute_fingerprint_too_short_returns_none():
     assert _compute_fingerprint(np.zeros(64, dtype=np.float32)) is None
 
 
+def test_compute_fingerprint_differs_on_different_audio():
+    """Spectrally different broadband signals should produce dissimilar fingerprints."""
+    rng = np.random.default_rng(42)
+    n = int(SAMPLERATE * 1.5)
+    noise = rng.standard_normal(n).astype(np.float32)
+    # Low-pass: keep only the first 1/8 of the spectrum
+    low_pass = np.fft.irfft(np.fft.rfft(noise) * np.r_[np.ones(len(noise) // 16), np.zeros(len(np.fft.rfft(noise)) - len(noise) // 16)]).astype(np.float32)[:n]
+    # High-pass: keep only the top 1/8 of the spectrum
+    spec = np.fft.rfft(noise)
+    hp_mask = np.r_[np.zeros(len(spec) - len(spec) // 8), np.ones(len(spec) // 8)]
+    high_pass = np.fft.irfft(spec * hp_mask).astype(np.float32)[:n]
+    fp_low  = _compute_fingerprint(low_pass)
+    fp_high = _compute_fingerprint(high_pass)
+    assert fp_low is not None and fp_high is not None
+    assert float(np.dot(fp_low, fp_high)) < 0.9
+
+
 # ── _infer_period ──────────────────────────────────────────────────────────────
 
 def test_infer_period_consistent_32():

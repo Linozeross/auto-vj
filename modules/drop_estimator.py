@@ -36,7 +36,7 @@ import numpy as np
 SAMPLERATE = 44100               # must match beat_detector.py
 HOP_SIZE = 512                   # ~11.6 ms per hop
 N_MELS = 64                      # mel bands for spectral fingerprint
-FINGERPRINT_WINDOW_SECS = 3.0    # audio window used per fingerprint
+FINGERPRINT_WINDOW_SECS = 1.5    # audio window used per fingerprint (shorter → faster divergence)
 ANALYSIS_INTERVAL_SECS = 0.25    # analysis timer interval
 FINGERPRINT_HISTORY_LEN = 16     # fingerprints kept in history deque
 COMPARISON_OFFSET = 4            # compare current fingerprint vs N steps ago (≈1 s)
@@ -100,13 +100,14 @@ class StructureEstimate:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _compute_fingerprint(audio: np.ndarray) -> np.ndarray | None:
-    """Mel spectrogram → time-averaged → L2-normalised 64-float vector."""
+    """Log-mel spectrogram → time-averaged → L2-normalised 64-float vector."""
     if len(audio) < HOP_SIZE * 4:
         return None
     mel = librosa.feature.melspectrogram(
         y=audio, sr=SAMPLERATE, n_mels=N_MELS, hop_length=HOP_SIZE
     )
-    vec = mel.mean(axis=1).astype(np.float64)
+    mel_db = librosa.power_to_db(mel, ref=np.max)  # log scale: amplifies subtle differences
+    vec = mel_db.mean(axis=1).astype(np.float64)
     norm = float(np.linalg.norm(vec))
     if norm < 1e-8:
         return None
