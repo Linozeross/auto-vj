@@ -17,7 +17,6 @@ import copy
 import json
 import os
 import platform
-import random
 import sys
 import threading
 import time
@@ -52,9 +51,9 @@ from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
 from modules.drop_estimator import DropEstimator, StructureEstimate, NOVELTY_THRESHOLD, NOVELTY_DISPLAY_MAX
-from modules.effects import VJResponse
+from modules.effects import VJResponse, SectionContextCommand
 from modules.recorder import SAMPLE_RATE, CHANNELS, audio_to_wav_b64
-from modules.sequences import Sequence, sequence_from_dict, sequence_from_effect_cmd, PHRASE_BEATS, BEATS_PER_BAR
+from modules.sequences import Sequence, sequence_from_dict, sequence_from_dict_capped, sequence_from_effect_cmd, PHRASE_BEATS, BEATS_PER_BAR
 
 load_dotenv()
 
@@ -87,13 +86,8 @@ AUTO_TRIGGER_AHEAD_BARS = 4      # start generating this many bars before queue 
 STRUCTURE_CONFIDENCE_MIN = 0.5   # minimum drop-estimator confidence to use for transition timing
 STRUCTURE_BEATS_WINDOW = 1.0     # advance queue when beats_to_change falls within this many beats
 DROP_MARKER_COLOR = "#ffcc00"    # colour of the predicted-drop marker in the queue widget
-AUTO_PROMPTS = [
-    "keep the energy going with something fresh",
-    "mix it up — new effect, different vibe",
-    "evolve the mood, keep the crowd moving",
-    "surprise me with something unexpected but fitting",
-    "change the scene, same energy level",
-]
+AUTO_QUEUE_STABLE_MAX: int = 2   # max stable sequences to buffer ahead (keeps queue lean near drops)
+AUTO_HISTORY_MAX_TURNS: int = 6  # trim GPT history to prevent context-window bloat
 
 # Effects that use "rate" instead of "speed"
 RATE_EFFECTS = {"pulse"}
@@ -220,6 +214,33 @@ def _strip_json_fences(raw: str) -> str:
     return raw.strip()
 
 
+def _build_auto_prompt(
+    section_context: SectionContextCommand | None,
+    is_section_change: bool,
+) -> str:
+    """Build a context-aware auto-generation prompt for GPT."""
+    if is_section_change or section_context is None:
+        if section_context:
+            return (
+                "A new musical section is starting. "
+                f"Create a noticeably different look from the current "
+                f"'{section_context.palette_name}' {section_context.effect_family} theme. "
+                "Choose a contrasting color palette and different effect style. "
+                "Include section_context in your response."
+            )
+        return (
+            "Start a fresh sequence. Choose any color palette and effect. "
+            "Include section_context in your response."
+        )
+    return (
+        f"The music is stable. Continue the '{section_context.palette_name}' "
+        f"{section_context.effect_family} vibe at {section_context.energy} energy. "
+        "Make a small variation — slightly different speed or brightness — "
+        "but keep the same color family and energy level. "
+        "Include the same or slightly updated section_context in your response."
+    )
+
+
 def _text_to_response(text: str, history: list[dict], client: OpenAI) -> tuple[VJResponse, list[dict]]:
     """Send a text prompt (no audio) to GPT and return a VJResponse."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
@@ -312,6 +333,12 @@ class VJWorker(QThread):
         # Auto mode
         self._auto_mode: bool = False
         self._auto_generating: bool = False
+        self._section_context: SectionContextCommand | None = None
+        self._pending_section_change: bool = False
+        # Pre-generated next-section content (held until the drop fires)
+        self._pending_change_seqs: list[Sequence] = []
+        self._pending_change_context: SectionContextCommand | None = None
+        self._change_seqs_ready: bool = False
         # Latest structure estimate (written from estimator timer thread, read from asyncio loop)
         self._last_structure: StructureEstimate | None = None
 
@@ -365,6 +392,14 @@ class VJWorker(QThread):
         def _on_structure(estimate: StructureEstimate) -> None:
             self._last_structure = estimate  # GIL-atomic write; read by _queue_watcher
             self.structure_changed.emit(estimate)
+            # Predictive trigger: change is coming within AUTO_TRIGGER_AHEAD_BARS of lead time
+            if (estimate.confidence >= STRUCTURE_CONFIDENCE_MIN
+                    and estimate.beats_to_change is not None
+                    and estimate.beats_to_change <= AUTO_TRIGGER_AHEAD_BARS * BEATS_PER_BAR
+                    and not self._pending_section_change):
+                self._pending_section_change = True
+                if self._loop and self._loop.is_running():
+                    self._loop.call_soon_threadsafe(self._handle_section_change)
 
         self._drop_estimator = DropEstimator(link_clock=self._link_clock)
         self._drop_estimator.set_callback(_on_structure)
@@ -414,20 +449,54 @@ class VJWorker(QThread):
             await asyncio.sleep(sleep_secs)
 
             # Advance queue at phrase boundaries (or at a predicted structural change)
-            if self._seq_current is not None and self._seq_queue:
+            if self._seq_current is not None:
                 seq_t = self._link_clock.beat - self._seq_start_beat
                 beat_number = self._link_clock._beat_number
-                if self._seq_current.is_done(seq_t) and self._should_advance_queue(beat_number):
-                    next_seq = self._seq_queue.pop(0)
-                    self._seq_current = next_seq
-                    self._seq_start_beat = self._link_clock.beat
-                    self._link_clock.attach_effect(next_seq)
-                    self._renderer.set_effect(next_seq)
-                    self.queue_status_changed.emit(len(self._seq_queue))
+                seq_done = self._seq_current.is_done(seq_t)
 
-            # Auto-refill: trigger when queue is empty and current is within
-            # AUTO_TRIGGER_AHEAD_BARS bars of ending (accounts for GPT latency)
-            if self._auto_mode and not self._auto_generating and len(self._seq_queue) == 0:
+                # Determine whether the drop estimator is firing right now
+                _est = self._last_structure
+                drop_now = (
+                    _est is not None
+                    and _est.beats_to_change is not None
+                    and _est.confidence >= STRUCTURE_CONFIDENCE_MIN
+                    and _est.beats_to_change <= STRUCTURE_BEATS_WINDOW
+                )
+
+                # Normal advance: sequence finished AND we're at a clean boundary.
+                # Force cut: new-section content is pre-loaded AND the drop fires now
+                #            (allows switching mid-sequence exactly at the musical moment).
+                # Early advance: change content is ready and sequence just finished —
+                #            don't wait for the next phrase boundary; swap immediately.
+                do_advance = (
+                    (seq_done and (self._should_advance_queue(beat_number) or self._change_seqs_ready))
+                    or (self._change_seqs_ready and drop_now)
+                )
+
+                if do_advance:
+                    # At the advance moment, inject pre-generated change content if ready
+                    if self._change_seqs_ready:
+                        self._seq_queue.clear()
+                        self._seq_queue.extend(self._pending_change_seqs)
+                        if self._pending_change_context is not None:
+                            self._section_context = self._pending_change_context
+                        self._pending_change_seqs = []
+                        self._pending_change_context = None
+                        self._change_seqs_ready = False
+                    if self._seq_queue:
+                        next_seq = self._seq_queue.pop(0)
+                        self._seq_current = next_seq
+                        self._seq_start_beat = self._link_clock.beat
+                        self._link_clock.attach_effect(next_seq)
+                        self._renderer.set_effect(next_seq)
+                        self.queue_status_changed.emit(len(self._seq_queue))
+
+            # Auto-refill: trigger when queue is below the stable buffer limit.
+            # Suppress only when change content is already pre-generated (it will
+            # replace the queue at the drop moment, so stable fills would be wasted).
+            if (self._auto_mode and not self._auto_generating
+                    and not self._change_seqs_ready
+                    and len(self._seq_queue) < AUTO_QUEUE_STABLE_MAX):
                 if self._seq_current is None:
                     should_trigger = True
                 else:
@@ -465,6 +534,21 @@ class VJWorker(QThread):
             return True
         return False
 
+    def _handle_section_change(self) -> None:
+        """Start pre-generating the next section while stable content keeps playing.
+
+        Runs on the asyncio loop thread (via call_soon_threadsafe).
+        The new-section sequences are held in _pending_change_seqs until the drop
+        fires, at which point the queue watcher swaps them in atomically.
+        """
+        if not self._auto_mode:
+            self._pending_section_change = False
+            return
+        # Kick generation immediately; the stable queue is NOT cleared here
+        if not self._auto_generating:
+            self._auto_generating = True
+            asyncio.ensure_future(self._auto_queue_refill())
+
     def get_current_beat(self) -> float:
         """Thread-safe read of the current Link beat position."""
         if self._link_clock is None:
@@ -472,19 +556,37 @@ class VJWorker(QThread):
         return self._link_clock.beat
 
     async def _auto_queue_refill(self) -> None:
-        """Generate a new sequence via text prompt and enqueue it."""
+        """Generate a new sequence via context-aware prompt and enqueue it."""
         try:
-            prompt = random.choice(AUTO_PROMPTS)
-            vj_response, self._history = await asyncio.to_thread(
-                _text_to_response, prompt, self._history, self._client
+            is_change = self._pending_section_change
+            self._pending_section_change = False
+
+            prompt = _build_auto_prompt(self._section_context, is_change)
+            history = self._history[-(AUTO_HISTORY_MAX_TURNS * 2):]
+
+            vj_response, new_history = await asyncio.to_thread(
+                _text_to_response, prompt, history, self._client
             )
+            self._history = new_history
+
+            if vj_response.section_context is not None:
+                self._section_context = vj_response.section_context
+
             if vj_response.bpm is not None:
                 bpm = float(vj_response.bpm)
                 self._link_clock.set_bpm(bpm)
                 self.bpm_changed.emit(bpm)
+
             if vj_response.sequences:
-                for s in vj_response.sequences:
-                    await self._enqueue_async(sequence_from_dict(s.model_dump()))
+                seqs = [sequence_from_dict_capped(s.model_dump()) for s in vj_response.sequences]
+                if is_change:
+                    # Hold the new section until the drop fires — queue watcher swaps it in
+                    self._pending_change_seqs = seqs
+                    self._pending_change_context = vj_response.section_context
+                    self._change_seqs_ready = True
+                else:
+                    for seq in seqs:
+                        await self._enqueue_async(seq)
                 first_step = vj_response.sequences[0].steps[0]
                 cmd = {"effect": first_step.effect, "params": first_step.params,
                        "filters": [f.model_dump() for f in first_step.filters]}
@@ -494,6 +596,11 @@ class VJWorker(QThread):
             print(f"[auto-vj] auto-refill failed: {exc}", file=sys.stderr)
         finally:
             self._auto_generating = False
+            # If a section change was flagged while this generation was in flight,
+            # kick it off now rather than waiting for the next _queue_watcher tick.
+            if self._pending_section_change and self._auto_mode and not self._change_seqs_ready:
+                self._auto_generating = True
+                asyncio.ensure_future(self._auto_queue_refill())
 
     def toggle_auto_mode(self) -> None:
         if self._loop:
@@ -501,6 +608,12 @@ class VJWorker(QThread):
 
     def _toggle_auto_mode_async(self) -> None:
         self._auto_mode = not self._auto_mode
+        if not self._auto_mode:
+            self._section_context = None
+            self._pending_section_change = False
+            self._pending_change_seqs = []
+            self._pending_change_context = None
+            self._change_seqs_ready = False
         self.auto_mode_changed.emit(self._auto_mode)
 
     async def _ptt_loop(self) -> None:

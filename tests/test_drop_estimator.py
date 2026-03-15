@@ -204,3 +204,70 @@ def test_should_trigger_auto_refill_drop_far_away():
     )
     stub = _stub_worker(est)
     assert stub._should_trigger_auto_refill(BEATS_PER_BAR * 10) is False
+
+
+# ── Section context schema tests ───────────────────────────────────────────────
+
+from modules.effects import SectionContextCommand, VJResponse
+
+
+def test_section_context_fields():
+    ctx = SectionContextCommand(palette_name="warm fire", effect_family="chase", energy="high")
+    assert ctx.palette_name == "warm fire"
+    assert ctx.effect_family == "chase"
+    assert ctx.energy == "high"
+
+
+def test_vj_response_section_context_optional():
+    r = VJResponse(sequences=[], section_context=None)
+    assert r.section_context is None
+
+
+def test_vj_response_section_context_present():
+    ctx = SectionContextCommand(palette_name="x", effect_family="wave", energy="low")
+    r = VJResponse(sequences=[], section_context=ctx)
+    assert r.section_context.energy == "low"
+
+
+# ── sequence_from_dict_capped tests ────────────────────────────────────────────
+
+from modules.sequences import sequence_from_dict_capped, MAX_STEP_DURATION_BARS, BEATS_PER_BAR as SPB
+
+
+def test_sequence_from_dict_capped_caps_long_step():
+    seq = sequence_from_dict_capped({
+        "steps": [{"effect": "pulse", "params": {"r": 255, "g": 0, "b": 0}, "duration_bars": 4.0}],
+        "repeats": 1,
+    })
+    assert seq.total_beats == MAX_STEP_DURATION_BARS * SPB
+
+
+def test_sequence_from_dict_capped_allows_short_step():
+    seq = sequence_from_dict_capped({
+        "steps": [{"effect": "rainbow", "params": {}, "duration_bars": 0.5}],
+        "repeats": 1,
+    })
+    assert seq.total_beats == 0.5 * SPB
+
+
+# ── _build_auto_prompt tests ───────────────────────────────────────────────────
+
+from modules.gui_app import _build_auto_prompt
+
+
+def test_build_auto_prompt_no_context():
+    prompt = _build_auto_prompt(None, is_section_change=False)
+    assert "section_context" in prompt
+
+
+def test_build_auto_prompt_change_flag():
+    ctx = SectionContextCommand(palette_name="fire", effect_family="chase", energy="high")
+    prompt = _build_auto_prompt(ctx, is_section_change=True)
+    assert "new musical section" in prompt
+
+
+def test_build_auto_prompt_stable_includes_context():
+    ctx = SectionContextCommand(palette_name="cool ocean", effect_family="wave", energy="medium")
+    prompt = _build_auto_prompt(ctx, is_section_change=False)
+    assert "cool ocean" in prompt
+    assert "wave" in prompt

@@ -5,6 +5,7 @@ from modules.effects import Effect, effect_from_dict
 
 BEATS_PER_BAR: int = 4
 DEFAULT_DURATION_BARS: float = 4.0
+MAX_STEP_DURATION_BARS: float = 1.0
 DEFAULT_REPEATS: int = 1
 PHRASE_BEATS: int = BEATS_PER_BAR * 4   # 4 bars = 16 beats
 MIN_REPEATS: int = 1
@@ -76,6 +77,24 @@ def sequence_from_dict(seq_cmd: dict) -> Sequence:
         })
         duration_beats = step.get("duration_bars", DEFAULT_DURATION_BARS) * BEATS_PER_BAR
         steps.append((effect, duration_beats))
+    return Sequence(
+        steps=steps,
+        repeats=seq_cmd.get("repeats", DEFAULT_REPEATS),
+        name=seq_cmd.get("name", ""),
+    )
+
+
+def sequence_from_dict_capped(seq_cmd: dict, max_bars: float = MAX_STEP_DURATION_BARS) -> Sequence:
+    """Like sequence_from_dict but caps each step's duration_bars to max_bars."""
+    steps = []
+    for step in seq_cmd["steps"]:
+        effect = effect_from_dict({
+            "effect": step["effect"],
+            "params": step.get("params", {}),
+            "filters": step.get("filters", []),
+        })
+        capped_bars = min(float(step.get("duration_bars", DEFAULT_DURATION_BARS)), max_bars)
+        steps.append((effect, capped_bars * BEATS_PER_BAR))
     return Sequence(
         steps=steps,
         repeats=seq_cmd.get("repeats", DEFAULT_REPEATS),

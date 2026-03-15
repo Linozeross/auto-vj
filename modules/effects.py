@@ -416,9 +416,16 @@ class SequenceCommand(BaseModel):
     name: str = ""
 
 
+class SectionContextCommand(BaseModel):
+    palette_name: str    # e.g. "warm fire", "cool ocean", "acid rave"
+    effect_family: str   # e.g. "chase", "pulse", "wave", "twinkle", "ambient"
+    energy: str          # "low" | "medium" | "high" | "peak"
+
+
 class VJResponse(BaseModel):
     sequences: list[SequenceCommand]
     bpm: float | None = None
+    section_context: SectionContextCommand | None = None
 
 
 # ── Registries & factory ───────────────────────────────────────────────────────

@@ -9,30 +9,53 @@ Respond ONLY with a JSON object. Always return a sequence — even a single effe
     {
       "name": "buildup",
       "steps": [
-        { "effect": "palette_wave", "params": {"palette": [[10,0,30],[180,0,200],[255,80,220]], "speed": 0.25}, "filters": [], "duration_bars": 4 },
-        { "effect": "chase",        "params": {"r": 255, "g": 80, "b": 0, "speed": 2.0}, "filters": [], "duration_bars": 4 }
+        { "effect": "palette_wave", "params": {"palette": [[10,0,30],[180,0,200],[255,80,220]], "speed": 0.25}, "filters": [], "duration_bars": 1 },
+        { "effect": "chase",        "params": {"r": 255, "g": 80, "b": 0, "speed": 2.0}, "filters": [], "duration_bars": 1 }
       ],
       "repeats": 2
     },
     {
       "name": "drop",
       "steps": [
-        { "effect": "beat_pulse", "params": {"r": 255, "g": 200, "b": 0, "sharpness": 6.0}, "filters": [], "duration_bars": 8 }
+        { "effect": "beat_pulse", "params": {"r": 255, "g": 200, "b": 0, "sharpness": 6.0}, "filters": [], "duration_bars": 1 }
       ],
-      "repeats": 1
+      "repeats": 4
     }
   ],
-  "bpm": null
+  "bpm": null,
+  "section_context": {
+    "palette_name": "warm purple",
+    "effect_family": "chase",
+    "energy": "high"
+  }
 }
 
 ━━━ SEQUENCE RULES ━━━
 
-- duration_bars: how long each step plays. 1 bar = 4 beats. Default: 4.
-- repeats: how many times the full step list cycles before the next sequence starts. Default: 1.
+- duration_bars: how long each step plays. 1 bar = 4 beats. Default: 1. Maximum: 1.
+  (The system caps longer values; always use 1 for clean bar-aligned switches.)
+- repeats: how many times the full step list cycles. Default: 1. Use repeats to control total length.
+  Examples: 4 bars total = 4 steps × 1 bar each, or 1 step × repeats=4.
 - Sequences switch at 16-beat (4-bar) phrase boundaries — clean DJ cuts.
-- Default total length when unspecified: 8 bars.
-- A simple one-shot command → 1 sequence, 1 step, duration_bars=8.
-- A journey/arc → multiple sequences, each describing a section (4–8 bars each).
+- A simple one-shot command → 1 sequence, 1 step, repeats=4 (4 bars).
+- A journey/arc → multiple sequences with different effects, each repeating 2–4 times.
+
+━━━ SECTION CONTEXT ━━━
+
+Always include "section_context" in your response. It describes the musical vibe you chose so future
+generations can stay consistent.
+
+  palette_name  — short colour mood label (e.g. "warm fire", "cold ice", "acid rave", "deep purple")
+  effect_family — one of: chase, pulse, wave, twinkle, strobe, ambient
+  energy        — one of: low, medium, high, peak
+
+When the prompt says "continue the X theme" (stable music):
+  → Keep the same palette_name and effect_family. Only vary parameters (speed, brightness, colour shade).
+  → Return the same section_context (or a very minor update).
+
+When the prompt says "new musical section is starting":
+  → Choose a contrasting palette and a different effect family.
+  → Return a fresh section_context that describes the new vibe.
 
 ━━━ EFFECTS ━━━
 

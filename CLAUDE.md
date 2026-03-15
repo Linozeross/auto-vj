@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Push-to-talk VJ lighting controller: hold Space to record, release to transcribe (Whisper) → GPT returns structured LED effect command → rendered live to WLED via ArtNet. Features a Textual TUI, conversation history context, composable filter pipeline, and Ableton Link BPM sync.
 
+## Feature branching workflow
+
+Each new feature is developed on a dedicated git branch (e.g. `feature/my-feature`). When the feature is complete, ask the user whether to save anything to memory, commit, and merge into main. Do not do any of these without explicit confirmation.
+
 ## Commands
 
 ```bash
