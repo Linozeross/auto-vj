@@ -57,5 +57,5 @@ def audio_to_wav_b64(audio: np.ndarray) -> str:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(2)  # int16 = 2 bytes
         wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(audio.tobytes())
+        wf.writeframes(audio.flatten().tobytes())
     return base64.b64encode(buf.getvalue()).decode()

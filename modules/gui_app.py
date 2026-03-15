@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, BadRequestError as OpenAIBadRequestError
 from pydantic import ValidationError
 
 import numpy as np
@@ -76,6 +76,7 @@ TAP_RESET_GAP_SECS = 2.0
 
 QUEUE_WIDGET_HEIGHT = 52
 QUEUE_ITEM_WIDTH = 72
+QUEUE_LOOP_GAP = 2
 
 SYSTEM_PROMPT = open("system_prompt.txt").read().strip()
 
@@ -260,10 +261,23 @@ class VJWorker(QThread):
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             self._loop.run_until_complete(self._main())
+        except asyncio.CancelledError:
+            pass  # clean shutdown via shutdown()
         except Exception:
             msg = traceback.format_exc()
             print(msg, file=sys.stderr)
             self.worker_error.emit(msg)
+
+    def shutdown(self) -> None:
+        """Cancel all asyncio tasks and stop the event loop. Call before wait()."""
+        self._stop_recording.set()
+        if self._loop and self._loop.is_running():
+            def _cancel() -> None:
+                if self._link_clock is not None:
+                    self._link_clock.stop()
+                for task in asyncio.all_tasks(self._loop):
+                    task.cancel()
+            self._loop.call_soon_threadsafe(_cancel)
 
     async def _main(self) -> None:
         self._client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -367,7 +381,7 @@ class VJWorker(QThread):
                 vj_response, self._history = await asyncio.to_thread(
                     _chat_to_response, audio, self._history, self._client
                 )
-            except (ValidationError, ValueError) as exc:
+            except (ValidationError, ValueError, OpenAIBadRequestError) as exc:
                 print(f"[auto-vj] GPT response rejected: {exc}", file=sys.stderr)
                 continue
 
@@ -469,23 +483,25 @@ class VJWorker(QThread):
         """Thread-safe snapshot of queue state for UI polling (GIL protects simple reads)."""
         current_name = ""
         current_effect = ""
-        phrase_phase = 0.0
+        seq_phase = 0.0
+        current_repeats = 1
 
         if self._seq_current is not None:
             current_name = self._seq_current.name or ""
             current_effect = current_name
+            current_repeats = self._seq_current.repeats
+            if self._link_clock is not None:
+                seq_t = self._link_clock.beat - self._seq_start_beat
+                total = self._seq_current.total_beats * self._seq_current.repeats
+                seq_phase = min(seq_t / total, 1.0) if total > 0 else 0.0
 
-        if self._link_clock is not None:
-            beat_number = self._link_clock._beat_number
-            beat_frac = self._link_clock.beat_phase()
-            phrase_phase = ((beat_number % PHRASE_BEATS) + beat_frac) / PHRASE_BEATS
-
-        queue_items = [{"name": seq.name or "", "effect": seq.name or ""} for seq in self._seq_queue]
+        queue_items = [{"name": seq.name or "", "effect": seq.name or "", "repeats": seq.repeats} for seq in self._seq_queue]
 
         return {
             "current_name": current_name,
             "current_effect": current_effect,
-            "phrase_phase": phrase_phase,
+            "seq_phase": seq_phase,
+            "current_repeats": current_repeats,
             "queue": queue_items,
         }
 
@@ -627,8 +643,11 @@ class SequenceQueueWidget(QWidget):
 
         queue = snap["queue"]
         n_queue = len(queue)
-        queue_total = n_queue * (QUEUE_ITEM_WIDTH + GAP) if n_queue else 0
-        current_w = max(100, w - MARGIN * 2 - queue_total - (GAP if n_queue else 0))
+        queue_total = sum(
+            item["repeats"] * QUEUE_ITEM_WIDTH + (item["repeats"] - 1) * QUEUE_LOOP_GAP + GAP
+            for item in queue
+        ) if n_queue else 0
+        current_w = max(100, w - MARGIN * 2 - queue_total)
 
         block_x = MARGIN
         block_y = MARGIN
@@ -636,13 +655,14 @@ class SequenceQueueWidget(QWidget):
 
         current_name = snap["current_name"]
         current_effect = snap["current_effect"]
-        phrase_phase = snap["phrase_phase"]
+        seq_phase = snap["seq_phase"]
+        current_repeats = snap["current_repeats"]
 
         if current_name:
             color_hex = EFFECT_COLORS.get(current_effect, "#888888")
             base_color = QColor(color_hex)
 
-            playhead_x = block_x + int(current_w * phrase_phase)
+            playhead_x = block_x + int(current_w * seq_phase)
 
             # Played region
             played = QColor(base_color)
@@ -653,6 +673,13 @@ class SequenceQueueWidget(QWidget):
             remain = QColor(base_color)
             remain.setAlpha(30)
             painter.fillRect(playhead_x, block_y, current_w - (playhead_x - block_x), block_h, remain)
+
+            # Loop dividers (dim vertical lines at each repeat boundary)
+            if current_repeats > 1:
+                painter.setPen(QPen(QColor(color_hex), 1))
+                for loop_i in range(1, current_repeats):
+                    div_x = block_x + int(current_w * loop_i / current_repeats)
+                    painter.drawLine(div_x, block_y, div_x, block_y + block_h - 1)
 
             # Border
             painter.setPen(QPen(QColor(color_hex), 1))
@@ -678,21 +705,26 @@ class SequenceQueueWidget(QWidget):
         for item in queue:
             effect = item["effect"]
             name = item["name"] or effect
+            repeats = item["repeats"]
             color_hex = EFFECT_COLORS.get(effect, "#888888")
 
-            fill = QColor(color_hex)
-            fill.setAlpha(120)
-            painter.fillRect(x, block_y, QUEUE_ITEM_WIDTH, block_h, fill)
+            for loop_i in range(repeats):
+                fill = QColor(color_hex)
+                fill.setAlpha(120)
+                painter.fillRect(x, block_y, QUEUE_ITEM_WIDTH, block_h, fill)
 
-            painter.setPen(QPen(QColor(color_hex), 1))
-            painter.drawRect(x, block_y, QUEUE_ITEM_WIDTH - 1, block_h - 1)
+                painter.setPen(QPen(QColor(color_hex), 1))
+                painter.drawRect(x, block_y, QUEUE_ITEM_WIDTH - 1, block_h - 1)
 
-            painter.setPen(QColor("#dddddd"))
-            painter.setFont(QFont(_MONO_FONT, 9))
-            painter.drawText(x + 4, block_y, QUEUE_ITEM_WIDTH - 8, block_h,
-                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                             name[:8])
-            x += QUEUE_ITEM_WIDTH + GAP
+                painter.setPen(QColor("#dddddd"))
+                painter.setFont(QFont(_MONO_FONT, 9))
+                label = name[:8] if loop_i == 0 else f"×{loop_i + 1}"
+                painter.drawText(x + 4, block_y, QUEUE_ITEM_WIDTH - 8, block_h,
+                                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                                 label)
+                x += QUEUE_ITEM_WIDTH + QUEUE_LOOP_GAP
+
+            x += GAP - QUEUE_LOOP_GAP
 
         painter.end()
 
@@ -991,4 +1023,9 @@ def run_gui() -> None:
     window.show()
     worker.start()
 
+    def _on_quit() -> None:
+        worker.shutdown()
+        worker.wait(3000)
+
+    app.aboutToQuit.connect(_on_quit)
     sys.exit(app.exec())
