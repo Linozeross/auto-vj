@@ -258,9 +258,12 @@ class Larson(Effect):
 
 class PaletteWave(Effect):
     """Scrolls a named color palette along the strip."""
-    def __init__(self, palette: str = "ember", speed: float = 1.0,
+    def __init__(self, palette = "ember", speed: float = 1.0,
                  stretch: float = 1.0, **_):
-        self._palette = PALETTES.get(palette, PALETTES["ember"])
+        if isinstance(palette, list):
+            self._palette = [tuple(c) for c in palette]
+        else:
+            self._palette = PALETTES.get(palette, PALETTES["ember"])
         self.speed = float(speed)
         self.stretch = float(stretch)
 

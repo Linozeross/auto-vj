@@ -42,6 +42,7 @@ def test_all_filters_in_registry():
     ("twinkle",      {"r": 255, "g": 255, "b": 255, "density": 0.5, "speed": 1.0}),
     ("plasma",       {"speed": 1.0, "scale": 1.0}),
     ("palette_wave", {"palette": "ocean", "speed": 1.0}),
+    ("palette_wave", {"palette": [[0, 0, 0], [255, 0, 0], [255, 200, 0]], "speed": 1.0}),
     ("beat_pulse",   {"r": 255, "g": 100, "b": 0, "sharpness": 4.0}),
 ])
 def test_effect_produces_valid_rgb(name, params):

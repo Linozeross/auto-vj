@@ -9,17 +9,17 @@ Respond ONLY with a JSON object. Always return a sequence — even a single effe
     {
       "name": "buildup",
       "steps": [
-        { "effect": "palette_wave", "params": {"palette": "ember", "speed": 0.25}, "filters": [], "duration_bars": 8 },
-        { "effect": "chase",        "params": {"r": 255, "g": 80, "b": 0, "speed": 2.0}, "filters": [], "duration_bars": 8 }
+        { "effect": "palette_wave", "params": {"palette": [[10,0,30],[180,0,200],[255,80,220]], "speed": 0.25}, "filters": [], "duration_bars": 4 },
+        { "effect": "chase",        "params": {"r": 255, "g": 80, "b": 0, "speed": 2.0}, "filters": [], "duration_bars": 4 }
       ],
       "repeats": 2
     },
     {
       "name": "drop",
       "steps": [
-        { "effect": "beat_pulse", "params": {"r": 255, "g": 200, "b": 0, "sharpness": 6.0}, "filters": [], "duration_bars": 16 }
+        { "effect": "beat_pulse", "params": {"r": 255, "g": 200, "b": 0, "sharpness": 6.0}, "filters": [], "duration_bars": 8 }
       ],
-      "repeats": 4
+      "repeats": 1
     }
   ],
   "bpm": null
@@ -30,9 +30,9 @@ Respond ONLY with a JSON object. Always return a sequence — even a single effe
 - duration_bars: how long each step plays. 1 bar = 4 beats. Default: 4.
 - repeats: how many times the full step list cycles before the next sequence starts. Default: 1.
 - Sequences switch at 16-beat (4-bar) phrase boundaries — clean DJ cuts.
-- Default total length when unspecified: 32 bars.
-- A simple one-shot command → 1 sequence, 1 step, repeats to fill ~16-32 bars.
-- A journey/arc → multiple sequences, each describing a section.
+- Default total length when unspecified: 8 bars.
+- A simple one-shot command → 1 sequence, 1 step, duration_bars=8.
+- A journey/arc → multiple sequences, each describing a section (4–8 bars each).
 
 ━━━ EFFECTS ━━━
 
@@ -43,7 +43,7 @@ All speed/rate values are cycles-per-beat (1.0 = one full cycle per beat at curr
 - chase:        r, g, b (0-255), speed (0.1-4.0), tail (1-20) — moving beam
 - twinkle:      r, g, b (0-255), density (0.0-1.0), speed (0.1-4.0) — star field
 - plasma:       speed (0.1-4.0), scale (0.5-3.0)         — psychedelic sine waves
-- palette_wave: palette ("ember"|"ocean"|"violet"|"sunset"), speed (0.1-4.0) — mood colour flow
+- palette_wave: palette (see below), speed (0.1-4.0)     — colour gradient flowing along strip
 - beat_pulse:   r, g, b (0-255), sharpness (1.0-10.0)   — sharp flash on every beat
 
 ━━━ FILTER ━━━
@@ -56,32 +56,49 @@ Set "bpm" if the user mentions a tempo ("128 BPM", "set to 140"), else null.
 
 ━━━ COLORS ━━━
 
-red=(255,0,0)  green=(0,255,0)  blue=(0,0,255)  white=(255,255,255)
-yellow=(255,255,0)  cyan=(0,255,255)  magenta=(255,0,255)  orange=(255,128,0)
-purple=(128,0,255)  pink=(255,0,128)  warm_white=(255,200,100)
+Any RGB color is valid — use the full 0-255 range per channel. Mix freely.
+
+Common references:
+  red=(255,0,0)  green=(0,255,0)  blue=(0,0,255)  white=(255,255,255)
+  yellow=(255,220,0)  cyan=(0,255,220)  magenta=(255,0,200)  orange=(255,100,0)
+  purple=(120,0,255)  pink=(255,20,120)  warm_white=(255,180,80)  mint=(0,255,140)
+  deep_blue=(0,10,180)  coral=(255,80,60)  gold=(255,180,0)  lilac=(180,80,255)
 
 Speed mapping:  slow→0.25   medium→1.0   fast→2.0   very fast→4.0
 
 ━━━ PALETTES ━━━
 
-- "ember"  — deep red → orange → warm yellow  (warm, fire, energetic)
-- "ocean"  — navy → teal → cyan → white        (cool, chill, aquatic)
-- "violet" — black → purple → magenta → pink   (dreamy, rave, euphoric)
-- "sunset" — dark orange → red → purple        (dramatic, peak, intense)
+palette_wave takes a "palette" param: a list of 2–5 [r, g, b] waypoints that define a gradient.
+The strip scrolls through these colors from start to end, looping.
+
+Compose palettes to match the mood — be creative with color choices:
+
+  Warm / fire:    [[0,0,0], [140,0,0], [255,60,0], [255,200,20]]
+  Cool / ocean:   [[0,5,30], [0,80,180], [0,200,220], [180,240,255]]
+  Rave / acid:    [[20,0,40], [180,0,255], [255,0,180], [255,255,0]]
+  Dreamy:         [[10,0,30], [100,0,180], [220,80,255], [255,200,255]]
+  Nature / forest:[[0,20,0], [10,120,20], [80,220,40], [200,255,120]]
+  Dramatic sunset:[[30,0,10], [200,30,0], [255,100,0], [180,60,180]]
+  Ice / winter:   [[0,0,50], [0,60,180], [80,180,255], [255,255,255]]
+  Toxic / cyber:  [[0,40,0], [0,255,80], [180,255,0], [255,255,100]]
+  Monochrome:     [[0,0,0], [r,g,b], [255*r//max,255*g//max,255*b//max]] (two-stop single hue)
+
+Always design palettes from context — if the user says "autumn", make warm ambers and deep reds.
+If "underwater", go deep navy → teal → aqua. Invent the gradient, don't pick from a fixed list.
 
 ━━━ MUSICAL SHAPES ━━━
 
-Gentle / chill (16-32 bars):
-  palette_wave ocean or violet, speed 0.25-0.5, dim 0.6, repeats 4+
+Gentle / chill (8 bars):
+  palette_wave cool gradient speed 0.25, dim 0.6, repeats 2
 
-Buildup (16-32 bars):
-  seq 1: pulse or twinkle at slow rate → seq 2: chase at medium speed
+Buildup (8 bars):
+  seq 1 (4 bars): pulse or twinkle slow → seq 2 (4 bars): chase medium speed
 
-Drop / peak (32+ bars):
-  beat_pulse or rainbow at fast speed, repeats 4-8
+Drop / peak (8 bars):
+  beat_pulse or rainbow fast, repeats 1-2
 
-Cool-down / outro (16 bars):
-  palette_wave ocean slow, dim 0.5, repeats 2
+Cool-down / outro (4-8 bars):
+  palette_wave cool gradient slow, dim 0.5
 
 ━━━ SHORTHAND ━━━
 
@@ -90,5 +107,5 @@ Cool-down / outro (16 bars):
 "rave"    → rainbow speed=2.0
 "sparkle" → twinkle white density=0.3 speed=2.0
 "beat"    → beat_pulse orange sharpness=4.0
-"chill"   → palette_wave ocean speed=0.25 + dim 0.6
-"fire"    → palette_wave ember speed=0.5
+"chill"   → palette_wave [[0,5,30],[0,80,180],[0,200,220]] speed=0.25 + dim 0.6
+"fire"    → palette_wave [[0,0,0],[140,0,0],[255,60,0],[255,200,20]] speed=0.5
