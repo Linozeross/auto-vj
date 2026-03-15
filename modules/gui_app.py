@@ -17,6 +17,7 @@ import copy
 import json
 import os
 import platform
+import random
 import sys
 import threading
 import time
@@ -51,7 +52,7 @@ from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
 from modules.effects import VJResponse
 from modules.recorder import SAMPLE_RATE, CHANNELS, audio_to_wav_b64
-from modules.sequences import Sequence, sequence_from_dict, sequence_from_effect_cmd, PHRASE_BEATS
+from modules.sequences import Sequence, sequence_from_dict, sequence_from_effect_cmd, PHRASE_BEATS, BEATS_PER_BAR
 
 load_dotenv()
 
@@ -79,6 +80,15 @@ QUEUE_ITEM_WIDTH = 72
 QUEUE_LOOP_GAP = 2
 
 SYSTEM_PROMPT = open("system_prompt.txt").read().strip()
+
+AUTO_TRIGGER_AHEAD_BARS = 4      # start generating this many bars before queue runs out
+AUTO_PROMPTS = [
+    "keep the energy going with something fresh",
+    "mix it up — new effect, different vibe",
+    "evolve the mood, keep the crowd moving",
+    "surprise me with something unexpected but fitting",
+    "change the scene, same energy level",
+]
 
 # Effects that use "rate" instead of "speed"
 RATE_EFFECTS = {"pulse"}
@@ -187,6 +197,33 @@ def _record_gui(stop_event: threading.Event,
     return np.concatenate(frames, axis=0)
 
 
+def _strip_json_fences(raw: str) -> str:
+    """Strip markdown code fences that some models wrap around JSON."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1]  # drop opening fence line
+        raw = raw.rsplit("```", 1)[0]  # drop closing fence
+    return raw.strip()
+
+
+def _text_to_response(text: str, history: list[dict], client: OpenAI) -> tuple[VJResponse, list[dict]]:
+    """Send a text prompt (no audio) to GPT and return a VJResponse."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+        {"role": "user", "content": text},
+    ]
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+    )
+    raw = _strip_json_fences(response.choices[0].message.content)
+    new_history = history + [
+        {"role": "user", "content": text},
+        {"role": "assistant", "content": raw},
+    ]
+    vj_response = VJResponse.model_validate(json.loads(raw))
+    return vj_response, new_history
+
+
 def _chat_to_response(audio: np.ndarray, history: list[dict], client: OpenAI) -> tuple[VJResponse, list[dict]]:
     b64 = audio_to_wav_b64(audio)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
@@ -199,7 +236,7 @@ def _chat_to_response(audio: np.ndarray, history: list[dict], client: OpenAI) ->
         modalities=["text"],
         messages=messages,
     )
-    raw = response.choices[0].message.content
+    raw = _strip_json_fences(response.choices[0].message.content)
     new_history = history + [
         {"role": "user", "content": "[voice command]"},
         {"role": "assistant", "content": raw},
@@ -236,6 +273,7 @@ class VJWorker(QThread):
     bpm_mode_changed    = pyqtSignal(str)
     queue_status_changed = pyqtSignal(int)           # queue_length
     worker_error        = pyqtSignal(str)            # fatal error message
+    auto_mode_changed   = pyqtSignal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -255,6 +293,9 @@ class VJWorker(QThread):
         # PTT coordination
         self._ptt_start: asyncio.Event | None = None
         self._stop_recording: threading.Event = threading.Event()
+        # Auto mode
+        self._auto_mode: bool = False
+        self._auto_generating: bool = False
 
     def run(self) -> None:
         try:
@@ -332,25 +373,70 @@ class VJWorker(QThread):
         self._renderer.set_effect(seq)
 
     async def _queue_watcher(self) -> None:
-        """Wake on sub-beat intervals and advance the queue at phrase boundaries."""
+        """Wake on sub-beat intervals, advance the queue at phrase boundaries, and trigger auto-refill."""
         while True:
             tempo = self._link_clock.tempo if self._link_clock else 120.0
             sleep_secs = 60.0 / max(tempo, 20.0) / 4.0
             await asyncio.sleep(sleep_secs)
 
-            if self._seq_current is None or not self._seq_queue:
-                continue
+            # Advance queue at phrase boundaries
+            if self._seq_current is not None and self._seq_queue:
+                seq_t = self._link_clock.beat - self._seq_start_beat
+                beat_number = self._link_clock._beat_number
+                if self._seq_current.is_done(seq_t) and beat_number % PHRASE_BEATS == 0:
+                    next_seq = self._seq_queue.pop(0)
+                    self._seq_current = next_seq
+                    self._seq_start_beat = self._link_clock.beat
+                    self._link_clock.attach_effect(next_seq)
+                    self._renderer.set_effect(next_seq)
+                    self.queue_status_changed.emit(len(self._seq_queue))
 
-            seq_t = self._link_clock.beat - self._seq_start_beat
-            beat_number = self._link_clock._beat_number
+            # Auto-refill: trigger when queue is empty and current is within
+            # AUTO_TRIGGER_AHEAD_BARS bars of ending (accounts for GPT latency)
+            if self._auto_mode and not self._auto_generating and len(self._seq_queue) == 0:
+                if self._seq_current is None:
+                    should_trigger = True
+                else:
+                    seq_t = self._link_clock.beat - self._seq_start_beat
+                    remaining_beats = (
+                        self._seq_current.total_beats * self._seq_current.repeats - seq_t
+                    )
+                    should_trigger = remaining_beats / BEATS_PER_BAR < AUTO_TRIGGER_AHEAD_BARS
+                if should_trigger:
+                    self._auto_generating = True
+                    asyncio.ensure_future(self._auto_queue_refill())
 
-            if self._seq_current.is_done(seq_t) and beat_number % PHRASE_BEATS == 0:
-                next_seq = self._seq_queue.pop(0)
-                self._seq_current = next_seq
-                self._seq_start_beat = self._link_clock.beat
-                self._link_clock.attach_effect(next_seq)
-                self._renderer.set_effect(next_seq)
-                self.queue_status_changed.emit(len(self._seq_queue))
+    async def _auto_queue_refill(self) -> None:
+        """Generate a new sequence via text prompt and enqueue it."""
+        try:
+            prompt = random.choice(AUTO_PROMPTS)
+            vj_response, self._history = await asyncio.to_thread(
+                _text_to_response, prompt, self._history, self._client
+            )
+            if vj_response.bpm is not None:
+                bpm = float(vj_response.bpm)
+                self._link_clock.set_bpm(bpm)
+                self.bpm_changed.emit(bpm)
+            if vj_response.sequences:
+                for s in vj_response.sequences:
+                    await self._enqueue_async(sequence_from_dict(s.model_dump()))
+                first_step = vj_response.sequences[0].steps[0]
+                cmd = {"effect": first_step.effect, "params": first_step.params,
+                       "filters": [f.model_dump() for f in first_step.filters]}
+                self._current_cmd = cmd
+                self.effect_activated.emit("[auto]", cmd)
+        except Exception as exc:
+            print(f"[auto-vj] auto-refill failed: {exc}", file=sys.stderr)
+        finally:
+            self._auto_generating = False
+
+    def toggle_auto_mode(self) -> None:
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._toggle_auto_mode_async)
+
+    def _toggle_auto_mode_async(self) -> None:
+        self._auto_mode = not self._auto_mode
+        self.auto_mode_changed.emit(self._auto_mode)
 
     async def _ptt_loop(self) -> None:
         self._ptt_start = asyncio.Event()
@@ -763,6 +849,7 @@ class VJMainWindow(QMainWindow):
         worker.bpm_mode_changed.connect(self._on_bpm_mode)
         worker.queue_status_changed.connect(self._on_queue_status)
         worker.worker_error.connect(self._on_worker_error)
+        worker.auto_mode_changed.connect(self._on_auto_mode)
 
         self._bpm_knob_timer = QTimer(self)
         self._bpm_knob_timer.setSingleShot(True)
@@ -815,12 +902,25 @@ class VJMainWindow(QMainWindow):
         )
         mode_btn.clicked.connect(self._worker.cycle_bpm_mode)
 
+        self._auto_pill = QPushButton("AUTO")
+        self._auto_pill.setFixedSize(52, 24)
+        self._auto_pill.setCheckable(True)
+        self._auto_pill.setToolTip("Auto-refill queue with AI prompts (A)")
+        self._auto_pill.setStyleSheet(
+            "QPushButton { background:#1a1a1a; border:1px solid #2a2a2a;"
+            " border-radius:3px; color:#444; font-size:10px; font-weight:bold; }"
+            "QPushButton:checked { background:#e0802022; border-color:#e0802066; color:#e08020; }"
+            "QPushButton:hover { border-color:#444; }"
+        )
+        self._auto_pill.clicked.connect(self._worker.toggle_auto_mode)
+
         row.addWidget(self._state_pill)
         row.addWidget(self._bpm_label)
         row.addWidget(self._link_label)
         row.addStretch()
         row.addWidget(self._mode_label)
         row.addWidget(mode_btn)
+        row.addWidget(self._auto_pill)
         return row
 
     def _build_effect_box(self) -> QGroupBox:
@@ -920,6 +1020,9 @@ class VJMainWindow(QMainWindow):
     def _on_queue_status(self, queue_length: int) -> None:
         pass  # queue widget self-updates via its 50ms timer
 
+    def _on_auto_mode(self, active: bool) -> None:
+        self._auto_pill.setChecked(active)
+
     def _on_bpm(self, bpm: float) -> None:
         self._bpm_label.setText(f"BPM: {bpm:.1f}")
         self._knob_bpm.set_value(bpm)
@@ -999,6 +1102,9 @@ class VJMainWindow(QMainWindow):
             return
         if key == Qt.Key.Key_M:
             self._worker.cycle_bpm_mode()
+            return
+        if key == Qt.Key.Key_A:
+            self._worker.toggle_auto_mode()
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._worker.tap_beat()
