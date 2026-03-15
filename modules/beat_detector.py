@@ -14,6 +14,7 @@ BUFFER_SECS = 20       # seconds of audio kept for analysis
 ANALYSIS_INTERVAL = 1  # re-estimate BPM every N seconds
 BPM_MIN = 60.0
 BPM_MAX = 200.0
+BPM_OCTAVE_TOLERANCE = 0.08  # fraction: if new ≈ prev/2 or prev*2, correct it
 
 
 def _estimate_bpm(audio: np.ndarray, samplerate: int = SAMPLERATE, hop_size: int = HOP_SIZE) -> float | None:
@@ -55,6 +56,10 @@ class MicBeatDetector:
     Listens to the default input device and periodically calls `on_bpm`
     with a refined BPM estimate.  Designed to run alongside PTT recording;
     call pause() / resume() to avoid conflicting sounddevice streams.
+
+    Additional consumers (e.g. DropEstimator) can subscribe to raw audio
+    chunks via add_chunk_subscriber() — each chunk is forwarded synchronously
+    in the sounddevice callback thread.
     """
 
     def __init__(self, on_bpm: Callable[[float], None]) -> None:
@@ -65,8 +70,18 @@ class MicBeatDetector:
         self._analysis_lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._running = False
+        self._chunk_subscribers: list[Callable[[np.ndarray], None]] = []
+        self._prev_bpm: float | None = None
 
     # ── public API ────────────────────────────────────────────────────────────
+
+    def add_chunk_subscriber(self, cb: Callable[[np.ndarray], None]) -> None:
+        """Register a callback to receive every raw audio chunk (float32 mono).
+
+        Called from the sounddevice callback thread — keep cb fast or hand off
+        to another thread/buffer internally.
+        """
+        self._chunk_subscribers.append(cb)
 
     def start(self) -> None:
         if self._running:
@@ -80,6 +95,7 @@ class MicBeatDetector:
         self._cancel_timer()
         self._close_stream()
         self._buffer.clear()
+        self._prev_bpm = None
 
     def pause(self) -> None:
         """Temporarily close the mic stream (e.g. during PTT recording)."""
@@ -124,6 +140,8 @@ class MicBeatDetector:
             total = sum(len(c) for c in self._buffer)
             while total - len(self._buffer[0]) >= self._buffer_samples:
                 total -= len(self._buffer.popleft())
+        for cb in self._chunk_subscribers:
+            cb(chunk)
 
     def _schedule_analysis(self) -> None:
         self._timer = threading.Timer(ANALYSIS_INTERVAL, self._analyse)
@@ -146,6 +164,13 @@ class MicBeatDetector:
 
         bpm = _estimate_bpm(audio)
         if bpm is not None:
+            if self._prev_bpm is not None:
+                ratio = bpm / self._prev_bpm
+                if abs(ratio - 0.5) < BPM_OCTAVE_TOLERANCE:
+                    bpm *= 2.0   # was half — double back
+                elif abs(ratio - 2.0) < BPM_OCTAVE_TOLERANCE:
+                    bpm *= 0.5   # was double — halve back
+            self._prev_bpm = bpm
             self._on_bpm(bpm)
 
         if self._running:

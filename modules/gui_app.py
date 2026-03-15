@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -50,6 +51,7 @@ import sounddevice as sd
 from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
+from modules.drop_estimator import DropEstimator, StructureEstimate, NOVELTY_THRESHOLD, NOVELTY_DISPLAY_MAX
 from modules.effects import VJResponse
 from modules.recorder import SAMPLE_RATE, CHANNELS, audio_to_wav_b64
 from modules.sequences import Sequence, sequence_from_dict, sequence_from_effect_cmd, PHRASE_BEATS, BEATS_PER_BAR
@@ -92,6 +94,12 @@ AUTO_PROMPTS = [
 
 # Effects that use "rate" instead of "speed"
 RATE_EFFECTS = {"pulse"}
+
+NOVELTY_COLORS: dict[str, str] = {
+    "active":  "#00e5ff",   # period established, countdown running
+    "pending": "#1a3a4a",   # no period yet
+    "hot":     "#ffcc00",   # novelty spike (change just detected)
+}
 
 STATE_COLORS: dict[str, str] = {
     "WAITING":      "#1a3a4a",
@@ -277,6 +285,7 @@ class VJWorker(QThread):
     queue_status_changed = pyqtSignal(int)           # queue_length
     worker_error        = pyqtSignal(str)            # fatal error message
     auto_mode_changed   = pyqtSignal(bool)
+    structure_changed   = pyqtSignal(object)         # StructureEstimate
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -288,6 +297,7 @@ class VJWorker(QThread):
         self._bpm_mode: BpmMode = BpmMode.LINK
         self._tap_times: list[float] = []
         self._beat_detector: MicBeatDetector | None = None
+        self._drop_estimator: DropEstimator | None = None
         self._client: OpenAI | None = None
         # Sequence queue state (asyncio-only, no lock needed)
         self._seq_queue: list[Sequence] = []
@@ -315,6 +325,10 @@ class VJWorker(QThread):
     def shutdown(self) -> None:
         """Cancel all asyncio tasks and stop the event loop. Call before wait()."""
         self._stop_recording.set()
+        if self._beat_detector:
+            self._beat_detector.stop()
+            if self._drop_estimator:
+                self._drop_estimator.stop()
         if self._loop and self._loop.is_running():
             def _cancel() -> None:
                 if self._link_clock is not None:
@@ -342,6 +356,17 @@ class VJWorker(QThread):
             self.bpm_changed.emit(bpm)
 
         self._beat_detector = MicBeatDetector(on_bpm=_on_mic_bpm)
+
+        def _on_structure(estimate: StructureEstimate) -> None:
+            self.structure_changed.emit(estimate)
+
+        self._drop_estimator = DropEstimator(link_clock=self._link_clock)
+        self._drop_estimator.set_callback(_on_structure)
+        self._beat_detector.add_chunk_subscriber(self._drop_estimator.feed_audio)
+
+        # Beat detector and drop estimator are started only in MIC mode to avoid
+        # holding a sounddevice stream that conflicts with PTT recording.
+        # (Start is triggered by cycle_bpm_mode when user switches to MIC.)
 
         nodes = _parse_artnet_nodes(ARTNET_NODES_RAW)
         self._renderer = MultiRenderer([
@@ -456,11 +481,15 @@ class VJWorker(QThread):
             def _on_recording_start() -> None:
                 if self._bpm_mode is BpmMode.MIC and self._beat_detector:
                     self._beat_detector.pause()
+                    if self._drop_estimator:
+                        self._drop_estimator.pause()
 
             audio = await asyncio.to_thread(_record_gui, self._stop_recording, _on_recording_start)
 
             if self._bpm_mode is BpmMode.MIC and self._beat_detector:
                 self._beat_detector.resume()
+                if self._drop_estimator:
+                    self._drop_estimator.resume()
 
             if audio.size == 0:
                 continue
@@ -555,12 +584,16 @@ class VJWorker(QThread):
 
         if self._bpm_mode is BpmMode.MIC and self._beat_detector:
             self._beat_detector.stop()
+            if self._drop_estimator:
+                self._drop_estimator.stop()
 
         self._bpm_mode = next_mode
         self._tap_times = []
 
         if self._bpm_mode is BpmMode.MIC and self._beat_detector:
             self._beat_detector.start()
+            if self._drop_estimator:
+                self._drop_estimator.start()
 
         self.bpm_mode_changed.emit(next_mode.value)
 
@@ -840,6 +873,7 @@ class VJMainWindow(QMainWindow):
 
         root.addLayout(self._build_status_bar())
         root.addWidget(self._build_effect_box())
+        root.addWidget(self._build_structure_box())
         root.addWidget(self._build_queue_box())
         root.addWidget(self._build_controls_box())
         root.addWidget(self._build_presets_box())
@@ -853,6 +887,7 @@ class VJMainWindow(QMainWindow):
         worker.queue_status_changed.connect(self._on_queue_status)
         worker.worker_error.connect(self._on_worker_error)
         worker.auto_mode_changed.connect(self._on_auto_mode)
+        worker.structure_changed.connect(self._on_structure)
 
         self._bpm_knob_timer = QTimer(self)
         self._bpm_knob_timer.setSingleShot(True)
@@ -891,6 +926,13 @@ class VJMainWindow(QMainWindow):
         self._link_label = QLabel("LINK: —")
         self._link_label.setStyleSheet("color: #1a3a4a; letter-spacing: 1px;")
 
+        self._structure_label = QLabel("~?b")
+        self._structure_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._structure_label.setStyleSheet(
+            f"QLabel {{ color: {NOVELTY_COLORS['pending']}; font-size: 10px;"
+            f" letter-spacing: 1px; }}"
+        )
+
         self._mode_label = QLabel("LINK")
         self._mode_label.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
         self._mode_label.setToolTip("BPM mode — press M to cycle")
@@ -920,6 +962,7 @@ class VJMainWindow(QMainWindow):
         row.addWidget(self._state_pill)
         row.addWidget(self._bpm_label)
         row.addWidget(self._link_label)
+        row.addWidget(self._structure_label)
         row.addStretch()
         row.addWidget(self._mode_label)
         row.addWidget(mode_btn)
@@ -934,6 +977,53 @@ class VJMainWindow(QMainWindow):
         self._effect_label.setStyleSheet("color: #1a3a4a; font-size: 11px; letter-spacing: 1px;")
         self._effect_label.setWordWrap(True)
         layout.addWidget(self._effect_label)
+        return box
+
+    def _build_structure_box(self) -> QGroupBox:
+        box = QGroupBox("[ STRUCTURE ]")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 10, 8, 6)
+        layout.setSpacing(4)
+
+        # Row 1: countdown + period + confidence
+        row1 = QHBoxLayout()
+        self._structure_countdown = QLabel("~?b")
+        self._structure_countdown.setStyleSheet(
+            f"color: {NOVELTY_COLORS['pending']}; font-size: 16px; font-weight: bold; letter-spacing: 2px;"
+        )
+        self._structure_period = QLabel("period: --")
+        self._structure_period.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
+        self._structure_conf = QLabel("conf: --")
+        self._structure_conf.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
+        row1.addWidget(self._structure_countdown)
+        row1.addStretch()
+        row1.addWidget(self._structure_period)
+        row1.addSpacing(10)
+        row1.addWidget(self._structure_conf)
+
+        # Row 2: novelty bar + value
+        row2 = QHBoxLayout()
+        novelty_lbl = QLabel("novelty")
+        novelty_lbl.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
+        self._novelty_bar = QProgressBar()
+        self._novelty_bar.setRange(0, 100)
+        self._novelty_bar.setValue(0)
+        self._novelty_bar.setTextVisible(False)
+        self._novelty_bar.setFixedHeight(6)
+        self._novelty_bar.setStyleSheet(
+            "QProgressBar { border: 1px solid #0d3344; background: #030a0e; border-radius: 0px; }"
+            f"QProgressBar::chunk {{ background: {NOVELTY_COLORS['pending']}; }}"
+        )
+        self._novelty_value = QLabel("0.00")
+        self._novelty_value.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
+        row2.addWidget(novelty_lbl)
+        row2.addSpacing(6)
+        row2.addWidget(self._novelty_bar)
+        row2.addSpacing(6)
+        row2.addWidget(self._novelty_value)
+
+        layout.addLayout(row1)
+        layout.addLayout(row2)
         return box
 
     def _build_queue_box(self) -> QGroupBox:
@@ -1037,6 +1127,57 @@ class VJMainWindow(QMainWindow):
     def _on_bpm_mode(self, mode: str) -> None:
         self._bpm_mode = mode
         self._mode_label.setText(mode.upper())
+
+    def _on_structure(self, est: object) -> None:
+        e: StructureEstimate = est  # type: ignore[assignment]
+
+        # Status bar pill — compact countdown only
+        if e.beats_to_change is not None:
+            pill_color = NOVELTY_COLORS["hot"] if e.novelty >= NOVELTY_THRESHOLD else NOVELTY_COLORS["active"]
+            self._structure_label.setText(f"~{int(e.beats_to_change)}b")
+        else:
+            pill_color = NOVELTY_COLORS["pending"]
+            self._structure_label.setText("~?b")
+        self._structure_label.setStyleSheet(
+            f"QLabel {{ color: {pill_color}; font-size: 10px; letter-spacing: 1px; }}"
+        )
+
+        # Structure box — countdown
+        if e.beats_to_change is not None:
+            cd_color = NOVELTY_COLORS["hot"] if e.novelty >= NOVELTY_THRESHOLD else NOVELTY_COLORS["active"]
+            self._structure_countdown.setText(f"~{int(e.beats_to_change)}b")
+        else:
+            cd_color = NOVELTY_COLORS["pending"]
+            self._structure_countdown.setText("~?b")
+        self._structure_countdown.setStyleSheet(
+            f"color: {cd_color}; font-size: 16px; font-weight: bold; letter-spacing: 2px;"
+        )
+
+        # Period + confidence
+        if e.change_period is not None:
+            self._structure_period.setText(f"period: {e.change_period}b")
+            self._structure_period.setStyleSheet(
+                f"color: {NOVELTY_COLORS['active']}; font-size: 10px; letter-spacing: 1px;"
+            )
+        else:
+            self._structure_period.setText("period: --")
+            self._structure_period.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
+
+        conf_pct = int(e.confidence * 100)
+        self._structure_conf.setText(f"conf: {conf_pct}%")
+        conf_color = NOVELTY_COLORS["active"] if conf_pct >= 60 else "#1a3a4a"
+        self._structure_conf.setStyleSheet(f"color: {conf_color}; font-size: 10px; letter-spacing: 1px;")
+
+        # Novelty bar — scaled so NOVELTY_DISPLAY_MAX fills 100%, threshold at 50%
+        bar_pct = int(min(e.novelty / NOVELTY_DISPLAY_MAX, 1.0) * 100)
+        self._novelty_bar.setValue(bar_pct)
+        bar_color = NOVELTY_COLORS["hot"] if e.novelty >= NOVELTY_THRESHOLD else NOVELTY_COLORS["active"]
+        self._novelty_bar.setStyleSheet(
+            "QProgressBar { border: 1px solid #0d3344; background: #030a0e; border-radius: 0px; }"
+            f"QProgressBar::chunk {{ background: {bar_color}; }}"
+        )
+        self._novelty_value.setText(f"{e.novelty:.2f}")
+        self._novelty_value.setStyleSheet(f"color: {bar_color}; font-size: 10px; letter-spacing: 1px;")
 
     def _on_worker_error(self, msg: str) -> None:
         self._apply_state_style("WAITING")

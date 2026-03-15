@@ -1,7 +1,7 @@
 [project]
 name = "auto-vj"
 version = "0.1.0"
-description = "Push-to-talk voice assistant powered by OpenAI"
+description = "Push-to-talk VJ lighting controller: voice → GPT → LED effects via ArtNet, with Ableton Link BPM sync"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -15,10 +15,11 @@ dependencies = [
     "textual>=8.1.1",
     "aalink>=0.2.1",
     "pyqt6>=6.10.2",
+    "librosa>=0.11.0",
 ]
 
 [project.scripts]
-auto-vj = "main:main"
+auto-vj-gui = "modules.gui_app:run_gui"
 
 [dependency-groups]
 dev = [
