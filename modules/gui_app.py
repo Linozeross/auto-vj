@@ -50,7 +50,7 @@ import sounddevice as sd
 from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
-from modules.drop_estimator import DropEstimator, StructureEstimate, NOVELTY_THRESHOLD, NOVELTY_DISPLAY_MAX
+from modules.drop_estimator import DropEstimator, StructureEstimate, NOVELTY_DISPLAY_MAX
 from modules.effects import VJResponse, SectionContextCommand
 from modules.recorder import SAMPLE_RATE, CHANNELS, audio_to_wav_b64
 from modules.sequences import Sequence, sequence_from_dict, sequence_from_dict_capped, sequence_from_effect_cmd, PHRASE_BEATS, BEATS_PER_BAR
@@ -96,6 +96,23 @@ NOVELTY_COLORS: dict[str, str] = {
     "active":  "#00e5ff",   # period established, countdown running
     "pending": "#1a3a4a",   # no period yet
     "hot":     "#ffcc00",   # novelty spike (change just detected)
+}
+
+class TierAction(str):
+    NONE      = "none"       # display only
+    PHRASE    = "phrase"     # advance at next phrase boundary
+    IMMEDIATE = "immediate"  # cut immediately when imminent
+
+TIER_ACTIONS: dict[str, str] = {
+    "minor": TierAction.NONE,
+    "major": TierAction.PHRASE,
+    "drop":  TierAction.IMMEDIATE,
+}
+
+TIER_COLORS: dict[str, str] = {
+    "minor": "#00e5ff",   # cyan
+    "major": "#ffcc00",   # yellow
+    "drop":  "#ff4400",   # orange-red
 }
 
 STATE_COLORS: dict[str, str] = {
@@ -392,11 +409,16 @@ class VJWorker(QThread):
         def _on_structure(estimate: StructureEstimate) -> None:
             self._last_structure = estimate  # GIL-atomic write; read by _queue_watcher
             self.structure_changed.emit(estimate)
-            # Predictive trigger: change is coming within AUTO_TRIGGER_AHEAD_BARS of lead time
-            if (estimate.confidence >= STRUCTURE_CONFIDENCE_MIN
-                    and estimate.beats_to_change is not None
-                    and estimate.beats_to_change <= AUTO_TRIGGER_AHEAD_BARS * BEATS_PER_BAR
-                    and not self._pending_section_change):
+            # Predictive trigger: pre-generate when a PHRASE or IMMEDIATE tier change
+            # is coming within AUTO_TRIGGER_AHEAD_BARS of lead time
+            should_pregenerate = any(
+                TIER_ACTIONS.get(tier_name) != TierAction.NONE
+                and te.confidence >= STRUCTURE_CONFIDENCE_MIN
+                and te.beats_to_change is not None
+                and te.beats_to_change <= AUTO_TRIGGER_AHEAD_BARS * BEATS_PER_BAR
+                for tier_name, te in estimate.tiers.items()
+            )
+            if should_pregenerate and not self._pending_section_change:
                 self._pending_section_change = True
                 if self._loop and self._loop.is_running():
                     self._loop.call_soon_threadsafe(self._handle_section_change)
@@ -454,13 +476,14 @@ class VJWorker(QThread):
                 beat_number = self._link_clock._beat_number
                 seq_done = self._seq_current.is_done(seq_t)
 
-                # Determine whether the drop estimator is firing right now
+                # Determine whether a drop-tier event is firing right now
                 _est = self._last_structure
+                _drop_tier = _est.tiers.get("drop") if _est is not None else None
                 drop_now = (
-                    _est is not None
-                    and _est.beats_to_change is not None
-                    and _est.confidence >= STRUCTURE_CONFIDENCE_MIN
-                    and _est.beats_to_change <= STRUCTURE_BEATS_WINDOW
+                    _drop_tier is not None
+                    and _drop_tier.confidence >= STRUCTURE_CONFIDENCE_MIN
+                    and _drop_tier.beats_to_change is not None
+                    and _drop_tier.beats_to_change <= STRUCTURE_BEATS_WINDOW
                 )
 
                 # Normal advance: sequence finished AND we're at a clean boundary.
@@ -512,14 +535,20 @@ class VJWorker(QThread):
     def _should_advance_queue(self, beat_number: int) -> bool:
         """Return True if it is appropriate to advance the sequence queue now.
 
-        Uses the drop estimator when confident; falls back to phrase-boundary logic.
+        Only IMMEDIATE-action tiers (drop) trigger an early cut; all others
+        fall back to phrase-boundary logic.
         """
         est = self._last_structure
-        if (est is not None
-                and est.beats_to_change is not None
-                and est.confidence >= STRUCTURE_CONFIDENCE_MIN
-                and est.beats_to_change <= STRUCTURE_BEATS_WINDOW):
-            return True
+        if est is not None and est.tiers:
+            for tier_name, action in TIER_ACTIONS.items():
+                if action != TierAction.IMMEDIATE:
+                    continue
+                te = est.tiers.get(tier_name)
+                if (te is not None
+                        and te.confidence >= STRUCTURE_CONFIDENCE_MIN
+                        and te.beats_to_change is not None
+                        and te.beats_to_change <= STRUCTURE_BEATS_WINDOW):
+                    return True
         return beat_number % PHRASE_BEATS == 0
 
     def _should_trigger_auto_refill(self, remaining_beats: float) -> bool:
@@ -527,11 +556,13 @@ class VJWorker(QThread):
         if remaining_beats / BEATS_PER_BAR < AUTO_TRIGGER_AHEAD_BARS:
             return True
         est = self._last_structure
-        if (est is not None
-                and est.beats_to_change is not None
-                and est.confidence >= STRUCTURE_CONFIDENCE_MIN
-                and est.beats_to_change <= AUTO_TRIGGER_AHEAD_BARS * BEATS_PER_BAR):
-            return True
+        if est is not None:
+            for tier_name, te in est.tiers.items():
+                if (TIER_ACTIONS.get(tier_name) != TierAction.NONE
+                        and te.confidence >= STRUCTURE_CONFIDENCE_MIN
+                        and te.beats_to_change is not None
+                        and te.beats_to_change <= AUTO_TRIGGER_AHEAD_BARS * BEATS_PER_BAR):
+                    return True
         return False
 
     def _handle_section_change(self) -> None:
@@ -769,13 +800,16 @@ class VJWorker(QThread):
 
         queue_items = [{"name": seq.name or "", "effect": seq.name or "", "repeats": seq.repeats} for seq in self._seq_queue]
 
-        # Pass drop marker position to the queue widget (None if estimate not confident)
-        next_change_beat = None
+        # Pass per-tier marker positions to the queue widget (only confident tiers)
+        tier_change_beats: dict[str, float] = {}
         est = self._last_structure
-        if (est is not None
-                and est.next_change_beat is not None
-                and est.confidence >= STRUCTURE_CONFIDENCE_MIN):
-            next_change_beat = est.next_change_beat
+        if est is not None:
+            for tier_name, te in est.tiers.items():
+                if (te.confidence >= STRUCTURE_CONFIDENCE_MIN
+                        and te.next_change_beat is not None):
+                    tier_change_beats[tier_name] = te.next_change_beat
+        # Keep backwards-compat flat field for other consumers
+        next_change_beat = est.next_change_beat if est is not None else None
 
         seq_total_beats = (
             self._seq_current.total_beats * self._seq_current.repeats
@@ -789,6 +823,7 @@ class VJWorker(QThread):
             "current_repeats": current_repeats,
             "queue": queue_items,
             "next_change_beat": next_change_beat,
+            "tier_change_beats": tier_change_beats,
             "seq_start_beat": self._seq_start_beat,
             "seq_total_beats": seq_total_beats,
         }
@@ -977,16 +1012,18 @@ class SequenceQueueWidget(QWidget):
             painter.setPen(QPen(QColor("#00e5ff"), 2))
             painter.drawLine(playhead_x, block_y, playhead_x, block_y + block_h - 1)
 
-            # Drop marker — predicted structural change from the drop estimator
-            next_change_beat = snap.get("next_change_beat")
+            # Tier markers — one dotted line per tier with its color
+            tier_change_beats: dict[str, float] = snap.get("tier_change_beats", {})
             seq_start_beat = snap.get("seq_start_beat", 0.0)
             seq_total = snap.get("seq_total_beats", 0)
-            if next_change_beat is not None and seq_total > 0:
-                drop_offset = next_change_beat - seq_start_beat
-                if 0 < drop_offset < seq_total:
-                    drop_x = block_x + int(drop_offset / seq_total * current_w)
-                    painter.setPen(QPen(QColor(DROP_MARKER_COLOR), 2, Qt.PenStyle.DotLine))
-                    painter.drawLine(drop_x, block_y, drop_x, block_y + block_h - 1)
+            if seq_total > 0:
+                for tier_name, ncb in tier_change_beats.items():
+                    offset = ncb - seq_start_beat
+                    if 0 < offset < seq_total:
+                        marker_x = block_x + int(offset / seq_total * current_w)
+                        marker_color = TIER_COLORS.get(tier_name, DROP_MARKER_COLOR)
+                        painter.setPen(QPen(QColor(marker_color), 2, Qt.PenStyle.DotLine))
+                        painter.drawLine(marker_x, block_y, marker_x, block_y + block_h - 1)
 
             # Label
             painter.setPen(QColor(color_hex))
@@ -1331,10 +1368,10 @@ class VJMainWindow(QMainWindow):
         conf_color = NOVELTY_COLORS["active"] if conf_pct >= 60 else "#1a3a4a"
         self._structure_conf.setStyleSheet(f"color: {conf_color}; font-size: 10px; letter-spacing: 1px;")
 
-        # Novelty bar — scaled so NOVELTY_DISPLAY_MAX fills 100%, threshold at 50%
+        # Novelty bar — scaled so NOVELTY_DISPLAY_MAX fills 100%; color = detected tier
         bar_pct = int(min(e.novelty / NOVELTY_DISPLAY_MAX, 1.0) * 100)
         self._novelty_bar.setValue(bar_pct)
-        bar_color = NOVELTY_COLORS["hot"] if e.novelty >= NOVELTY_THRESHOLD else NOVELTY_COLORS["active"]
+        bar_color = TIER_COLORS.get(e.detected_tier, NOVELTY_COLORS["active"]) if e.detected_tier else NOVELTY_COLORS["active"]
         self._novelty_bar.setStyleSheet(
             "QProgressBar { border: 1px solid #0d3344; background: #030a0e; border-radius: 0px; }"
             f"QProgressBar::chunk {{ background: {bar_color}; }}"
@@ -1343,15 +1380,19 @@ class VJMainWindow(QMainWindow):
         self._novelty_value.setStyleSheet(f"color: {bar_color}; font-size: 10px; letter-spacing: 1px;")
 
     def _update_countdown(self) -> None:
-        """Recompute the beats-to-change countdown every 50 ms for smooth display."""
+        """Recompute the beats-to-change countdown every 50 ms for smooth display.
+
+        Shows the most imminent tier with a label prefix (e.g. "drop ~6b") and
+        colors the text using that tier's color.
+        """
         e = self._last_structure_est
-        if e is None or e.next_change_beat is None:
+        if e is None or e.most_imminent_tier is None or e.next_change_beat is None:
             self._structure_label.setText("~?b")
             self._structure_countdown.setText("~?b")
             return
         beats_left = max(0.0, e.next_change_beat - self._worker.get_current_beat())
-        cd_color = NOVELTY_COLORS["hot"] if e.novelty >= NOVELTY_THRESHOLD else NOVELTY_COLORS["active"]
-        text = f"~{int(beats_left)}b"
+        cd_color = TIER_COLORS.get(e.most_imminent_tier, NOVELTY_COLORS["active"])
+        text = f"{e.most_imminent_tier} ~{int(beats_left)}b"
         self._structure_label.setText(text)
         self._structure_label.setStyleSheet(
             f"QLabel {{ color: {cd_color}; font-size: 10px; letter-spacing: 1px; }}"

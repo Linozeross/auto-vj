@@ -6,9 +6,16 @@ import pytest
 from modules.drop_estimator import (
     SAMPLERATE,
     N_MELS,
+    NOVELTY_THRESHOLD,
+    MAJOR_NOVELTY_PERCENTILE,
+    DROP_NOVELTY_PERCENTILE,
+    ChangeEvent,
+    ChangeType,
+    TierEstimate,
     StructureEstimate,
     _compute_fingerprint,
     _infer_period,
+    _classify_event,
 )
 from modules.gui_app import (
     VJWorker,
@@ -137,29 +144,35 @@ def test_structure_estimate_next_change_beat_set():
 
 # ── _should_advance_queue ──────────────────────────────────────────────────────
 
-def test_should_advance_queue_high_confidence_triggers():
-    est = StructureEstimate(
-        beats_to_change=0.5,
+def _make_est_with_drop_tier(beats_to_change: float, confidence: float) -> StructureEstimate:
+    """Build a StructureEstimate with a populated drop TierEstimate."""
+    drop_tier = TierEstimate(
         change_period=16,
-        beats_since_change=15.5,
-        novelty=0.2,
-        confidence=0.8,
-        next_change_beat=100.5,
+        beats_to_change=beats_to_change,
+        beats_since_change=16.0 - beats_to_change,
+        confidence=confidence,
+        next_change_beat=100.0 + beats_to_change,
     )
+    return StructureEstimate(
+        beats_to_change=beats_to_change,
+        change_period=16,
+        beats_since_change=16.0 - beats_to_change,
+        novelty=0.2,
+        confidence=confidence,
+        next_change_beat=100.0 + beats_to_change,
+        tiers={"drop": drop_tier},
+    )
+
+
+def test_should_advance_queue_high_confidence_triggers():
+    est = _make_est_with_drop_tier(beats_to_change=0.5, confidence=0.8)
     stub = _stub_worker(est)
-    # beat_number not at phrase boundary (e.g. 7), but drop is imminent
+    # beat_number not at phrase boundary (e.g. 7), but drop is imminent → True
     assert stub._should_advance_queue(7) is True
 
 
 def test_should_advance_queue_low_confidence_falls_back_to_phrase():
-    est = StructureEstimate(
-        beats_to_change=0.5,
-        change_period=16,
-        beats_since_change=15.5,
-        novelty=0.2,
-        confidence=0.3,   # below STRUCTURE_CONFIDENCE_MIN
-        next_change_beat=100.5,
-    )
+    est = _make_est_with_drop_tier(beats_to_change=0.5, confidence=0.3)  # below min
     stub = _stub_worker(est)
     assert stub._should_advance_queue(16) is True   # phrase boundary → True
     assert stub._should_advance_queue(7) is False   # not phrase boundary → False
@@ -180,13 +193,14 @@ def test_should_trigger_auto_refill_low_remaining_beats():
 
 
 def test_should_trigger_auto_refill_drop_approaching():
+    drop_tier = TierEstimate(
+        change_period=32, beats_to_change=8.0,  # within 4 bars (16 beats)
+        beats_since_change=24.0, confidence=0.8, next_change_beat=200.0,
+    )
     est = StructureEstimate(
-        beats_to_change=8.0,  # within 4 bars (16 beats)
-        change_period=32,
-        beats_since_change=24.0,
-        novelty=0.2,
-        confidence=0.8,
-        next_change_beat=200.0,
+        beats_to_change=8.0, change_period=32, beats_since_change=24.0,
+        novelty=0.2, confidence=0.8, next_change_beat=200.0,
+        tiers={"drop": drop_tier},
     )
     stub = _stub_worker(est)
     # Plenty of remaining beats, but a drop is coming soon
@@ -271,3 +285,60 @@ def test_build_auto_prompt_stable_includes_context():
     prompt = _build_auto_prompt(ctx, is_section_change=False)
     assert "cool ocean" in prompt
     assert "wave" in prompt
+
+
+# ── ChangeEvent & _classify_event tests ────────────────────────────────────────
+
+def test_change_event_fields():
+    ev = ChangeEvent(beat=64.0, novelty=0.35)
+    assert ev.beat == pytest.approx(64.0)
+    assert ev.novelty == pytest.approx(0.35)
+
+
+def test_classify_event_fallback_below_min_events():
+    # Only 1 event → fallback thresholds: minor < 1.5×, major < 3×, drop >= 3×
+    events = [ChangeEvent(beat=0.0, novelty=0.20)]
+    assert _classify_event(NOVELTY_THRESHOLD * 1.5 - 0.001, events) == ChangeType.MINOR
+    assert _classify_event(NOVELTY_THRESHOLD * 1.5, events) == ChangeType.MAJOR
+    assert _classify_event(NOVELTY_THRESHOLD * 3, events) == ChangeType.DROP
+
+
+def test_classify_event_adaptive_percentiles():
+    # 10 events with linearly increasing novelty; check all three tiers
+    events = [ChangeEvent(beat=float(i * 16), novelty=0.10 + i * 0.01) for i in range(10)]
+    scores = [e.novelty for e in events]
+    major_thr = float(np.percentile(scores, MAJOR_NOVELTY_PERCENTILE))
+    drop_thr  = float(np.percentile(scores, DROP_NOVELTY_PERCENTILE))
+    assert _classify_event(major_thr - 0.001, events) == ChangeType.MINOR
+    assert _classify_event(major_thr, events) == ChangeType.MAJOR
+    assert _classify_event(drop_thr, events) == ChangeType.DROP
+
+
+def test_classify_event_drop_tier_infers_period():
+    # Drop events at 32-beat spacing → period=32
+    assert _infer_period([0.0, 32.0])[0] == 32
+
+
+def test_tier_estimate_fields():
+    te = TierEstimate(change_period=32, beats_to_change=16.0, beats_since_change=16.0, confidence=0.8)
+    assert te.change_period == 32
+    assert te.next_change_beat is None
+
+
+def test_structure_estimate_tier_fields_default():
+    est = StructureEstimate(
+        beats_to_change=None, change_period=None,
+        beats_since_change=0.0, novelty=0.0, confidence=0.0,
+    )
+    assert est.tiers == {}
+    assert est.detected_tier is None
+    assert est.most_imminent_tier is None
+
+
+def test_structure_estimate_detected_tier_set():
+    est = StructureEstimate(
+        beats_to_change=16.0, change_period=32,
+        beats_since_change=16.0, novelty=0.4, confidence=0.9,
+        detected_tier="drop",
+    )
+    assert est.detected_tier == "drop"
