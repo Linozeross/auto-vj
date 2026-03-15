@@ -424,6 +424,7 @@ class VJResponse(BaseModel):
 # ── Registries & factory ───────────────────────────────────────────────────────
 
 EFFECT_REGISTRY: dict[str, type[Effect]] = {
+    "solid":        SolidColor,
     "pulse":        Pulse,
     "rainbow":      Rainbow,
     "chase":        Chase,

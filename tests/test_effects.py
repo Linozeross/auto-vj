@@ -29,7 +29,7 @@ def valid_rgb(color: list[int]) -> bool:
 
 def test_all_effects_in_registry():
     expected = {
-        "pulse", "rainbow", "chase", "twinkle", "plasma",
+        "solid", "pulse", "rainbow", "chase", "twinkle", "plasma",
         "palette_wave", "beat_pulse", "strip_solid", "strip_chase",
     }
     assert set(EFFECT_REGISTRY.keys()) == expected
