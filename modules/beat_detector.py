@@ -12,7 +12,7 @@ SAMPLERATE = 44100
 HOP_SIZE = 512         # ~11.6 ms per hop at 44.1 kHz
 BUFFER_SECS = 20       # seconds of audio kept for analysis
 ANALYSIS_INTERVAL = 1  # re-estimate BPM every N seconds
-BPM_MIN = 60.0
+BPM_MIN = 85.0
 BPM_MAX = 200.0
 BPM_OCTAVE_TOLERANCE = 0.08  # fraction: if new ≈ prev/2 or prev*2, correct it
 

@@ -36,15 +36,18 @@ import numpy as np
 SAMPLERATE = 44100               # must match beat_detector.py
 HOP_SIZE = 512                   # ~11.6 ms per hop
 N_MELS = 64                      # mel bands for spectral fingerprint
-FINGERPRINT_WINDOW_SECS = 1.5    # audio window used per fingerprint (shorter → faster divergence)
-ANALYSIS_INTERVAL_SECS = 0.25    # analysis timer interval
-FINGERPRINT_HISTORY_LEN = 16     # fingerprints kept in history deque
-COMPARISON_OFFSET = 4            # compare current fingerprint vs N steps ago (≈1 s)
+FINGERPRINT_WINDOW_SECS = 1.0    # audio window per fingerprint
+ANALYSIS_INTERVAL_SECS  = 0.10   # analysis timer interval
+FINGERPRINT_HISTORY_LEN = 16     # steps kept in fingerprint history deque
+COMPARISON_OFFSET       = 10     # compare vs ≈1 s ago (10 × 0.10 s)
 
 NOVELTY_EMA_ALPHA = 0.35         # EMA weight for new novelty values (lower = smoother)
 NOVELTY_THRESHOLD = 0.10         # smoothed novelty threshold → change detected
 NOVELTY_DISPLAY_MAX = NOVELTY_THRESHOLD * 2  # novelty value that fills the bar
-MIN_CHANGE_SPACING_BEATS = 6     # cooldown: ignore changes closer than this (must be < smallest phrase candidate)
+MINOR_MIN_SPACING_BEATS = 8    # min beats between minor events (≈2 bars)
+MAJOR_MIN_SPACING_BEATS = 16   # min beats between major events (≈4 bars)
+DROP_MIN_SPACING_BEATS  = 32   # min beats between drops (≈8 bars)
+HIGHER_TIER_SUPPRESS_BEATS = 12  # suppress lower-tier events when higher tier expected within N beats
 PHRASE_CANDIDATES = [8, 16, 32, 64]  # valid EDM phrase lengths in beats
 MAX_CHANGE_HISTORY = 8           # change events per tier used for period inference
 CONFIDENCE_REQUIRED_RATIO = 0.6  # fraction of intervals that must agree
@@ -57,6 +60,12 @@ DROP_NOVELTY_PERCENTILE    = 80   # events above 80th percentile = drop
 _BUFFER_SAMPLES = int(SAMPLERATE * FINGERPRINT_WINDOW_SECS)
 
 _TIER_NAMES = ("minor", "major", "drop")
+_TIER_ORDER = {"minor": 0, "major": 1, "drop": 2}
+_TIER_MIN_SPACING = {
+    "minor": MINOR_MIN_SPACING_BEATS,
+    "major": MAJOR_MIN_SPACING_BEATS,
+    "drop":  DROP_MIN_SPACING_BEATS,
+}
 
 
 # ── Data structures ────────────────────────────────────────────────────────────
@@ -100,14 +109,13 @@ class StructureEstimate:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _compute_fingerprint(audio: np.ndarray) -> np.ndarray | None:
-    """Log-mel spectrogram → time-averaged → L2-normalised 64-float vector."""
+    """Mel spectrogram → time-averaged → L2-normalised 64-float vector."""
     if len(audio) < HOP_SIZE * 4:
         return None
     mel = librosa.feature.melspectrogram(
         y=audio, sr=SAMPLERATE, n_mels=N_MELS, hop_length=HOP_SIZE
     )
-    mel_db = librosa.power_to_db(mel, ref=np.max)  # log scale: amplifies subtle differences
-    vec = mel_db.mean(axis=1).astype(np.float64)
+    vec = mel.mean(axis=1).astype(np.float64)
     norm = float(np.linalg.norm(vec))
     if norm < 1e-8:
         return None
@@ -152,6 +160,26 @@ def _infer_period(
     return period, confidence
 
 
+def _is_higher_tier_imminent(
+    tier_name: str,
+    tier_periods: dict[str, int | None],
+    tier_last_beats: dict[str, float | None],
+    current_beat: float,
+) -> bool:
+    """True if a tier strictly above tier_name is predicted within HIGHER_TIER_SUPPRESS_BEATS."""
+    for name in _TIER_NAMES:
+        if _TIER_ORDER[name] <= _TIER_ORDER[tier_name]:
+            continue
+        last   = tier_last_beats[name]
+        period = tier_periods[name]
+        if last is None or period is None:
+            continue
+        beats_to_next = period - (current_beat - last) % period
+        if beats_to_next <= HIGHER_TIER_SUPPRESS_BEATS:
+            return True
+    return False
+
+
 def _classify_event(novelty: float, all_events: list[ChangeEvent]) -> ChangeType:
     """Classify a novelty spike into minor / major / drop based on the song's history.
 
@@ -191,13 +219,10 @@ class DropEstimator:
         self._buffer_lock = threading.Lock()
 
         # Fingerprint history (L2-normalised mel vectors)
-        self._fingerprint_history: deque[np.ndarray] = deque(
-            maxlen=FINGERPRINT_HISTORY_LEN
-        )
+        self._fingerprint_history: deque[np.ndarray] = deque(maxlen=FINGERPRINT_HISTORY_LEN)
 
         # Change event tracking — long-term (all tiers combined, for adaptive threshold)
         self._change_events: list[ChangeEvent] = []
-        self._last_change_beat: float | None = None  # cooldown guard
 
         # Per-tier tracking
         self._tier_events: dict[str, list[ChangeEvent]] = {n: [] for n in _TIER_NAMES}
@@ -256,7 +281,6 @@ class DropEstimator:
             self._buffer.clear()
         self._fingerprint_history.clear()
         self._change_events.clear()
-        self._last_change_beat = None
         for name in _TIER_NAMES:
             self._tier_events[name].clear()
             self._tier_last_beat[name] = None
@@ -302,13 +326,12 @@ class DropEstimator:
                 self._schedule_analysis()
             return
 
-        # Compute novelty vs fingerprint COMPARISON_OFFSET steps ago
-        novelty = 0.0
+        # Cosine distance vs COMPARISON_OFFSET steps ago (≈1 s)
         self._fingerprint_history.append(fingerprint)
+        novelty = 0.0
         if len(self._fingerprint_history) > COMPARISON_OFFSET:
             past = self._fingerprint_history[-1 - COMPARISON_OFFSET]
-            raw = float(1.0 - np.dot(fingerprint, past))
-            novelty = max(0.0, min(1.0, raw))
+            novelty = max(0.0, min(1.0, float(1.0 - np.dot(fingerprint, past))))
         self._last_novelty = novelty
         self._smoothed_novelty = (
             NOVELTY_EMA_ALPHA * novelty
@@ -317,32 +340,34 @@ class DropEstimator:
 
         current_beat = self._link_clock.beat
 
-        # Detect and classify change events
-        beats_since_last = (
-            current_beat - self._last_change_beat
-            if self._last_change_beat is not None
-            else float("inf")
-        )
+        # Detect and classify change events (per-tier cooldowns + predictive suppression)
         detected_tier: str | None = None
-        if self._smoothed_novelty > NOVELTY_THRESHOLD and beats_since_last > MIN_CHANGE_SPACING_BEATS:
-            self._last_change_beat = current_beat
-            event = ChangeEvent(beat=current_beat, novelty=self._last_novelty)
-            self._change_events.append(event)
-            if len(self._change_events) > NOVELTY_HISTORY_MAX_EVENTS:
-                self._change_events.pop(0)
+        if self._smoothed_novelty > NOVELTY_THRESHOLD:
+            tier = _classify_event(self._last_novelty, self._change_events)
+            tier_name = tier.value
+            last_tier_beat = self._tier_last_beat[tier_name]
+            beats_since_tier = (
+                current_beat - last_tier_beat if last_tier_beat is not None else float("inf")
+            )
+            if (beats_since_tier > _TIER_MIN_SPACING[tier_name]
+                    and not _is_higher_tier_imminent(
+                        tier_name, self._tier_period, self._tier_last_beat, current_beat
+                    )):
+                event = ChangeEvent(beat=current_beat, novelty=self._last_novelty)
+                self._change_events.append(event)
+                if len(self._change_events) > NOVELTY_HISTORY_MAX_EVENTS:
+                    self._change_events.pop(0)
+                detected_tier = tier_name
+                self._tier_last_beat[tier_name] = current_beat
+                self._tier_events[tier_name].append(event)
+                if len(self._tier_events[tier_name]) > MAX_CHANGE_HISTORY:
+                    self._tier_events[tier_name].pop(0)
 
-            tier = _classify_event(event.novelty, self._change_events)
-            detected_tier = tier.value
-            self._tier_last_beat[tier.value] = current_beat
-            self._tier_events[tier.value].append(event)
-            if len(self._tier_events[tier.value]) > MAX_CHANGE_HISTORY:
-                self._tier_events[tier.value].pop(0)
-
-            # Infer period independently per tier
-            tier_beats = [e.beat for e in self._tier_events[tier.value]]
-            period, _ = _infer_period(tier_beats)
-            if period is not None:
-                self._tier_period[tier.value] = period
+                # Infer period independently per tier
+                tier_beats = [e.beat for e in self._tier_events[tier_name]]
+                period, _ = _infer_period(tier_beats)
+                if period is not None:
+                    self._tier_period[tier_name] = period
 
         # Build per-tier estimates
         tiers: dict[str, TierEstimate] = {}

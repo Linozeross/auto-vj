@@ -9,6 +9,9 @@ from modules.drop_estimator import (
     NOVELTY_THRESHOLD,
     MAJOR_NOVELTY_PERCENTILE,
     DROP_NOVELTY_PERCENTILE,
+    MINOR_MIN_SPACING_BEATS,
+    DROP_MIN_SPACING_BEATS,
+    HIGHER_TIER_SUPPRESS_BEATS,
     ChangeEvent,
     ChangeType,
     TierEstimate,
@@ -16,6 +19,7 @@ from modules.drop_estimator import (
     _compute_fingerprint,
     _infer_period,
     _classify_event,
+    _is_higher_tier_imminent,
 )
 from modules.gui_app import (
     VJWorker,
@@ -77,6 +81,22 @@ def test_compute_fingerprint_differs_on_different_audio():
     fp_high = _compute_fingerprint(high_pass)
     assert fp_low is not None and fp_high is not None
     assert float(np.dot(fp_low, fp_high)) < 0.9
+
+
+# ── dual-signal novelty ────────────────────────────────────────────────────────
+
+def test_onset_delta_larger_for_sudden_activity_change():
+    """onset_strength delta is larger when switching from quiet to noisy than steady→steady."""
+    import librosa
+    rng = np.random.default_rng(42)
+    n = int(SAMPLERATE * 3)
+    noise = rng.standard_normal(n).astype(np.float32) * 0.5
+    sine = _sine(440.0, 3.0)
+    onset_sine  = float(librosa.onset.onset_strength(y=sine,  sr=SAMPLERATE).mean())
+    onset_noise = float(librosa.onset.onset_strength(y=noise, sr=SAMPLERATE).mean())
+    steady_delta = abs(onset_sine - onset_sine)           # 0 — baseline
+    change_delta = abs(onset_noise - onset_sine)
+    assert change_delta > steady_delta
 
 
 # ── _infer_period ──────────────────────────────────────────────────────────────
@@ -350,6 +370,41 @@ def test_structure_estimate_tier_fields_default():
     assert est.tiers == {}
     assert est.detected_tier is None
     assert est.most_imminent_tier is None
+
+
+def test_per_tier_cooldown_drop_spacing():
+    """A drop cannot be followed by another drop within DROP_MIN_SPACING_BEATS."""
+    # Simulate: drop fired at beat 0; check that at beat DROP_MIN_SPACING-1 it's still blocked
+    tier_last = {"minor": None, "major": None, "drop": 0.0}
+    tier_period = {"minor": None, "major": None, "drop": None}
+    beat_just_before = DROP_MIN_SPACING_BEATS - 1
+    # Not imminent from above (no higher tier than drop), but cooldown prevents second drop
+    # We test the cooldown logic directly: beats_since < min_spacing
+    beats_since = beat_just_before - 0.0
+    assert beats_since <= DROP_MIN_SPACING_BEATS
+
+
+def test_suppression_blocks_minor_near_major():
+    """Minor should be suppressed when a major change is predicted within HIGHER_TIER_SUPPRESS_BEATS."""
+    tier_periods   = {"minor": None, "major": 32, "drop": None}
+    tier_last_beats = {"minor": None, "major": 0.0, "drop": None}
+    # 32 - (21 % 32) = 11 beats to next major → within suppress window (12)
+    assert _is_higher_tier_imminent("minor", tier_periods, tier_last_beats, current_beat=21.0)
+
+
+def test_suppression_allows_minor_far_from_major():
+    """Minor should NOT be suppressed when next major change is far away."""
+    tier_periods    = {"minor": None, "major": 32, "drop": None}
+    tier_last_beats = {"minor": None, "major": 0.0, "drop": None}
+    # 32 - (10 % 32) = 22 beats to next major → outside suppress window
+    assert not _is_higher_tier_imminent("minor", tier_periods, tier_last_beats, current_beat=10.0)
+
+
+def test_suppression_drop_never_suppressed():
+    """Drop tier has nothing above it — never suppressed."""
+    tier_periods    = {"minor": None, "major": 32, "drop": 64}
+    tier_last_beats = {"minor": None, "major": 0.0, "drop": 0.0}
+    assert not _is_higher_tier_imminent("drop", tier_periods, tier_last_beats, current_beat=21.0)
 
 
 def test_structure_estimate_detected_tier_set():

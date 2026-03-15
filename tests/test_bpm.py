@@ -1,7 +1,9 @@
 """Tests for modules/bpm.py — LinkClock."""
 import asyncio
+import numpy as np
 import pytest
 from modules.bpm import LinkClock
+from modules.beat_detector import _estimate_bpm, BPM_MIN
 from modules.effects import Effect
 
 
@@ -15,6 +17,15 @@ class _BeatCounter(Effect):
 
     def on_beat(self, bpm, beat_number):
         self.count += 1
+
+
+def test_estimate_bpm_never_below_minimum():
+    """_estimate_bpm must never return a value below BPM_MIN (85)."""
+    rng = np.random.default_rng(0)
+    audio = rng.standard_normal(44100 * 10).astype(np.float32)
+    bpm = _estimate_bpm(audio)
+    if bpm is not None:
+        assert bpm >= BPM_MIN
 
 
 @pytest.mark.asyncio
