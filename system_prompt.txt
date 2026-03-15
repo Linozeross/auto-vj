@@ -45,10 +45,19 @@ All speed/rate values are cycles-per-beat (1.0 = one full cycle per beat at curr
 - plasma:       speed (0.1-4.0), scale (0.5-3.0)         — psychedelic sine waves
 - palette_wave: palette (see below), speed (0.1-4.0)     — colour gradient flowing along strip
 - beat_pulse:   r, g, b (0-255), sharpness (1.0-10.0)   — sharp flash on every beat
+- strip_solid:  speed (0.05-1.0), saturation (0.0-1.0), brightness (0.0-1.0)
+                — each physical lamp a distinct hue, all slowly rotating through the colour wheel
+- strip_chase:  r, g, b (0-255), speed (0.25-4.0), tail (0-3)
+                — a glowing block sweeps across lamps one at a time; tail = number of decaying lamps behind
 
-━━━ FILTER ━━━
+━━━ FILTERS ━━━
 
-- dim: brightness (0.0-1.0) — lower overall brightness. Use for subtle/chill moments.
+- dim:   brightness (0.0-1.0) — lower overall brightness. Use for subtle/chill moments.
+- strip: mode ("isolate"|"phase"|"cascade"), phase_shift (0.0-1.0, default 0.25)
+         Make any effect lamp-aware:
+           isolate  — each lamp fills independently (rainbow fills each lamp, not the full strip)
+           phase    — each lamp is offset in time by phase_shift beats (creates a cascade/wave across lamps)
+           cascade  — isolate + phase: each lamp fills independently and is staggered in time
 
 ━━━ BPM ━━━
 

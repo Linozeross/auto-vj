@@ -1,4 +1,5 @@
 import math
+import os
 import random
 import colorsys
 from abc import ABC, abstractmethod
@@ -36,6 +37,27 @@ def _palette_color(palette: list[tuple[int, int, int]], pos: float) -> list[int]
         int(g1 + (g2 - g1) * frac),
         int(b1 + (b2 - b1) * frac),
     ]
+
+
+# ── Strip layout ───────────────────────────────────────────────────────────────
+
+_STRIP_LAYOUT_RAW = os.environ.get("STRIP_LAYOUT", "")
+STRIP_SIZES: list[int] = (
+    [int(x) for x in _STRIP_LAYOUT_RAW.split(",") if x.strip()]
+    if _STRIP_LAYOUT_RAW.strip() else []
+)
+
+
+def led_to_strip(led_index: int, strip_sizes: list[int]) -> tuple[int, int, int]:
+    """Map global led_index → (strip_index, pos_within_strip, strip_len).
+    Falls back to (0, led_index, 1) if strip_sizes is empty."""
+    cursor = 0
+    for i, size in enumerate(strip_sizes):
+        if led_index < cursor + size:
+            return i, led_index - cursor, size
+        cursor += size
+    last = len(strip_sizes) - 1
+    return last, strip_sizes[last] - 1, strip_sizes[last]
 
 
 # ── Base classes ───────────────────────────────────────────────────────────────
@@ -99,6 +121,38 @@ class DimFilter(Filter):
     def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
         rgb = self._inner.get_color(t, led_index, total_leds)
         return [int(v * self._brightness) for v in rgb]
+
+
+class StripFilter(Filter):
+    """Make any effect strip-aware. Three modes:
+
+    - "isolate"  (default): each strip sees (pos_within_strip, strip_len)
+                  Effect fills each lamp independently (rainbow per lamp, etc.)
+    - "phase":   each strip sees t offset by strip_index * phase_shift
+                  Cascading wave across lamps with global LED indexing.
+    - "cascade": isolate + phase combined
+                  Effect fills each lamp with a per-lamp time offset.
+    """
+    ISOLATE = "isolate"
+    PHASE = "phase"
+    CASCADE = "cascade"
+
+    def __init__(self, inner: Effect, mode: str = "isolate", phase_shift: float = 0.25, **_):
+        super().__init__(inner)
+        self._mode = mode
+        self._phase_shift = float(phase_shift)
+
+    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
+        sizes = STRIP_SIZES or [total_leds]
+        strip_idx, pos, strip_len = led_to_strip(led_index, sizes)
+
+        if self._mode == StripFilter.ISOLATE:
+            return self._inner.get_color(t, pos, strip_len)
+        elif self._mode == StripFilter.PHASE:
+            return self._inner.get_color(t + strip_idx * self._phase_shift, led_index, total_leds)
+        elif self._mode == StripFilter.CASCADE:
+            return self._inner.get_color(t + strip_idx * self._phase_shift, pos, strip_len)
+        return self._inner.get_color(t, led_index, total_leds)
 
 
 # ── Effects ────────────────────────────────────────────────────────────────────
@@ -289,15 +343,56 @@ class BeatPulse(Effect):
         return [int(self.r * brightness), int(self.g * brightness), int(self.b * brightness)]
 
 
+class StripSolid(Effect):
+    """Each strip shows a uniform hue; hues are evenly spaced and rotate over time."""
+    def __init__(self, speed: float = 0.1, saturation: float = 1.0, brightness: float = 1.0, **_):
+        self._speed = float(speed)
+        self._sat = float(saturation)
+        self._bri = float(brightness)
+
+    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
+        sizes = STRIP_SIZES or [total_leds]
+        strip_idx, _, _ = led_to_strip(led_index, sizes)
+        hue = (strip_idx / len(sizes) + t * self._speed) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, self._sat, self._bri)
+        return [int(r * 255), int(g * 255), int(b * 255)]
+
+
+class StripChase(Effect):
+    """A lit block sweeps across strips one at a time; trailing strips decay."""
+    def __init__(self, r: int = 255, g: int = 255, b: int = 255,
+                 speed: float = 1.0, tail: int = 1, **_):
+        self._r = int(r)
+        self._g = int(g)
+        self._b = int(b)
+        self._speed = float(speed)
+        self._tail = int(tail)
+
+    def get_color(self, t: float, led_index: int, total_leds: int) -> list[int]:
+        sizes = STRIP_SIZES or [total_leds]
+        n = len(sizes)
+        strip_idx, _, _ = led_to_strip(led_index, sizes)
+        head = int(t * self._speed) % n
+        dist = (strip_idx - head) % n
+        if dist == 0:
+            factor = 1.0
+        elif dist <= self._tail:
+            factor = 0.5 ** dist
+        else:
+            factor = 0.0
+        return [int(self._r * factor), int(self._g * factor), int(self._b * factor)]
+
+
 # ── GPT schema ─────────────────────────────────────────────────────────────────
 
 EFFECT_NAMES = Literal[
     "pulse", "rainbow", "chase", "twinkle", "plasma", "palette_wave", "beat_pulse",
+    "strip_solid", "strip_chase",
 ]
 
 
 class FilterCommand(BaseModel):
-    type: Literal["dim"]
+    type: Literal["dim", "strip"]
     params: dict[str, Any] = {}
 
 
@@ -336,10 +431,13 @@ EFFECT_REGISTRY: dict[str, type[Effect]] = {
     "plasma":       Plasma,
     "palette_wave": PaletteWave,
     "beat_pulse":   BeatPulse,
+    "strip_solid":  StripSolid,
+    "strip_chase":  StripChase,
 }
 
 FILTER_REGISTRY: dict[str, type[Filter]] = {
-    "dim": DimFilter,
+    "dim":   DimFilter,
+    "strip": StripFilter,
 }
 
 

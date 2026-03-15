@@ -1,15 +1,19 @@
 """Tests for modules/effects.py — effects, filters, factory, schema."""
 import pytest
+import modules.effects as fx
 from modules.effects import (
     # Effects
     SolidColor, ColorWave, Pulse, Rainbow, Chase,
     Meteor, Twinkle, Plasma, Larson, PaletteWave, BeatPulse,
+    StripSolid, StripChase,
     # Filters
-    GammaFilter, MirrorFilter, ReverseFilter, DimFilter,
+    GammaFilter, MirrorFilter, ReverseFilter, DimFilter, StripFilter,
     # Factory & registries
     effect_from_dict, EFFECT_REGISTRY, FILTER_REGISTRY,
     # Schema
     EffectCommand, FilterCommand,
+    # Strip helpers
+    led_to_strip,
 )
 # Note: SolidColor, ColorWave, Meteor, Larson and GammaFilter/MirrorFilter/ReverseFilter
 # are kept as classes but removed from registries — imported here for class-level tests only.
@@ -24,12 +28,15 @@ def valid_rgb(color: list[int]) -> bool:
 # ── Registry completeness ─────────────────────────────────────────────────────
 
 def test_all_effects_in_registry():
-    expected = {"pulse", "rainbow", "chase", "twinkle", "plasma", "palette_wave", "beat_pulse"}
+    expected = {
+        "pulse", "rainbow", "chase", "twinkle", "plasma",
+        "palette_wave", "beat_pulse", "strip_solid", "strip_chase",
+    }
     assert set(EFFECT_REGISTRY.keys()) == expected
 
 
 def test_all_filters_in_registry():
-    assert set(FILTER_REGISTRY.keys()) == {"dim"}
+    assert set(FILTER_REGISTRY.keys()) == {"dim", "strip"}
 
 
 # ── All effects produce valid RGB ─────────────────────────────────────────────
@@ -233,3 +240,68 @@ def test_effect_command_with_filters():
 def test_filter_command_invalid_type():
     with pytest.raises(Exception):
         FilterCommand(type="not_a_filter")
+
+
+# ── Strip layout helper ────────────────────────────────────────────────────────
+
+def test_led_to_strip_maps_correctly():
+    sizes = [25, 25, 25, 25]
+    assert led_to_strip(0, sizes) == (0, 0, 25)
+    assert led_to_strip(24, sizes) == (0, 24, 25)
+    assert led_to_strip(25, sizes) == (1, 0, 25)
+    assert led_to_strip(75, sizes) == (3, 0, 25)
+
+
+def test_led_to_strip_unequal_strips():
+    sizes = [10, 20, 30]
+    assert led_to_strip(0, sizes) == (0, 0, 10)
+    assert led_to_strip(10, sizes) == (1, 0, 20)
+    assert led_to_strip(30, sizes) == (2, 0, 30)
+
+
+# ── StripFilter ────────────────────────────────────────────────────────────────
+
+def test_strip_filter_isolate_same_position_same_color(monkeypatch):
+    monkeypatch.setattr(fx, "STRIP_SIZES", [25, 25])
+    inner = Rainbow(speed=0.0)
+    f = StripFilter(inner, mode="isolate")
+    # LED 0 (strip 0, pos 0) and LED 25 (strip 1, pos 0) — same local position → same color
+    assert f.get_color(0, 0, 50) == f.get_color(0, 25, 50)
+
+
+def test_strip_filter_phase_offsets_time(monkeypatch):
+    monkeypatch.setattr(fx, "STRIP_SIZES", [25, 25])
+    inner = Pulse(r=255, g=0, b=0, rate=1.0)
+    f = StripFilter(inner, mode="phase", phase_shift=0.25)
+    # strip 0 (t=0, brightness=0.5) vs strip 1 (t=0.25, brightness=1.0) → different
+    assert f.get_color(0, 0, 50) != f.get_color(0, 25, 50)
+
+
+# ── StripSolid ────────────────────────────────────────────────────────────────
+
+def test_strip_solid_distinct_hues_per_strip(monkeypatch):
+    monkeypatch.setattr(fx, "STRIP_SIZES", [25, 25])
+    e = StripSolid(speed=0.0)
+    assert e.get_color(0, 0, 50) != e.get_color(0, 25, 50)
+
+
+def test_strip_solid_uniform_within_strip(monkeypatch):
+    monkeypatch.setattr(fx, "STRIP_SIZES", [25, 25])
+    e = StripSolid(speed=0.0)
+    # All LEDs within strip 0 should be the same color
+    colors = [e.get_color(0, i, 50) for i in range(25)]
+    assert all(c == colors[0] for c in colors)
+
+
+# ── StripChase ────────────────────────────────────────────────────────────────
+
+def test_strip_chase_head_is_full_brightness(monkeypatch):
+    monkeypatch.setattr(fx, "STRIP_SIZES", [25, 25, 25, 25])
+    e = StripChase(r=255, g=0, b=0, speed=1.0, tail=0)
+    assert e.get_color(0, 0, 100) == [255, 0, 0]
+
+
+def test_strip_chase_non_tail_strip_is_dark(monkeypatch):
+    monkeypatch.setattr(fx, "STRIP_SIZES", [25, 25, 25, 25])
+    e = StripChase(r=255, g=0, b=0, speed=1.0, tail=0)
+    assert e.get_color(0, 50, 100) == [0, 0, 0]
