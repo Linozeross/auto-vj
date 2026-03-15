@@ -94,21 +94,21 @@ AUTO_PROMPTS = [
 RATE_EFFECTS = {"pulse"}
 
 STATE_COLORS: dict[str, str] = {
-    "WAITING":      "#555555",
-    "RECORDING":    "#cc3333",
-    "TRANSCRIBING": "#b8a020",
-    "THINKING":     "#2090b8",
-    "LIVE":         "#2ea850",
+    "WAITING":      "#1a3a4a",
+    "RECORDING":    "#ff2200",
+    "TRANSCRIBING": "#ff9900",
+    "THINKING":     "#0088ff",
+    "LIVE":         "#00ff88",
 }
 
 EFFECT_COLORS: dict[str, str] = {
-    "pulse":        "#cc44cc",
-    "rainbow":      "#d4c040",
-    "chase":        "#40c860",
-    "twinkle":      "#60e0e0",
-    "plasma":       "#d060e0",
-    "palette_wave": "#e08020",
-    "beat_pulse":   "#d09000",
+    "pulse":        "#ff00aa",
+    "rainbow":      "#ffee00",
+    "chase":        "#00ff44",
+    "twinkle":      "#00eeff",
+    "plasma":       "#cc00ff",
+    "palette_wave": "#ff6600",
+    "beat_pulse":   "#ffcc00",
 }
 
 # Qt QSS accepts only a single font-family value (no comma fallback lists).
@@ -116,22 +116,25 @@ _MONO_FONT = "Menlo" if platform.system() == "Darwin" else "Consolas"
 
 def _build_qss(font: str) -> str:
     return (
-        f'QMainWindow, QWidget {{ background-color: #0e0e0e; color: #d4d4d4;'
+        f'QMainWindow, QWidget {{ background-color: #030a0e; color: #88ccdd;'
         f' font-family: "{font}"; font-size: 12px; }}\n'
-        'QGroupBox { border: 1px solid #222; border-radius: 4px; margin-top: 10px;'
-        ' color: #444; font-size: 10px; padding: 4px; }\n'
-        'QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }\n'
-        'QLabel#state-pill { border-radius: 3px; padding: 2px 10px;'
-        ' font-size: 11px; font-weight: bold; }\n'
-        'QPushButton#preset-btn { background-color: #141414; color: #555;'
-        ' border: 1px solid #252525; border-radius: 4px; padding: 4px 2px;'
-        ' font-size: 11px; min-height: 48px; text-align: center; }\n'
-        'QPushButton#preset-btn[filled="true"] { color: #d4d4d4; border-color: #333; }\n'
-        'QPushButton#preset-btn:hover { border-color: #444; }\n'
-        'QPushButton#preset-btn:pressed { background-color: #202020; }\n'
-        'QPushButton#star-btn { background-color: #141414; color: #888;'
-        ' border: 1px solid #252525; border-radius: 4px; padding: 4px 14px; }\n'
-        'QPushButton#star-btn:hover { border-color: #c08020; color: #e09820; }\n'
+        'QGroupBox { border: 1px solid #0d3344; border-radius: 0px; margin-top: 12px;'
+        ' color: #00e5ff; font-size: 10px; font-weight: bold; padding: 4px;'
+        ' letter-spacing: 2px; }\n'
+        'QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 6px;'
+        ' background-color: #030a0e; }\n'
+        'QLabel#state-pill { border-radius: 0px; padding: 2px 10px;'
+        ' font-size: 11px; font-weight: bold; letter-spacing: 3px; }\n'
+        'QPushButton#preset-btn { background-color: #050d14; color: #0d3344;'
+        ' border: 1px solid #0a1e2a; border-radius: 0px; padding: 4px 2px;'
+        ' font-size: 11px; min-height: 48px; text-align: center; letter-spacing: 1px; }\n'
+        'QPushButton#preset-btn[filled="true"] { color: #88ccdd; border-color: #0d3344; }\n'
+        'QPushButton#preset-btn:hover { border-color: #005566; }\n'
+        'QPushButton#preset-btn:pressed { background-color: #071520; }\n'
+        'QPushButton#star-btn { background-color: #050d14; color: #2a4455;'
+        ' border: 1px solid #0a1e2a; border-radius: 0px; padding: 4px 14px;'
+        ' letter-spacing: 1px; }\n'
+        'QPushButton#star-btn:hover { border-color: #ff9900; color: #ff9900; }\n'
     )
 
 DARK_QSS = _build_qss(_MONO_FONT)
@@ -617,11 +620,11 @@ class KnobWidget(QWidget):
 
         self._top_label = QLabel(label)
         self._top_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._top_label.setStyleSheet("color: #555; font-size: 10px;")
+        self._top_label.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 2px;")
 
         self._val_label = QLabel()
         self._val_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._val_label.setStyleSheet("color: #bbb; font-size: 11px; font-weight: bold;")
+        self._val_label.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: bold;")
 
         layout.addWidget(self._dial, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._top_label)
@@ -675,22 +678,22 @@ class PresetButton(QPushButton):
         slot_num = self._slot + 1
         if self._preset:
             name = self._preset.get("label") or self._preset.get("cmd", {}).get("effect", "?")
-            color = EFFECT_COLORS.get(self._preset.get("cmd", {}).get("effect", ""), "#d4d4d4")
+            color = EFFECT_COLORS.get(self._preset.get("cmd", {}).get("effect", ""), "#88ccdd")
             self.setText(f"{slot_num}\n{name}")
             self.setStyleSheet(
                 f"QPushButton#preset-btn {{ color: {color};"
-                " background-color: #141414; border: 1px solid #333;"
-                " border-radius: 4px; min-height: 48px; font-size: 11px; }"
-                f"QPushButton#preset-btn:hover {{ border-color: #666; }}"
-                f"QPushButton#preset-btn:pressed {{ background-color: #202020; }}"
+                " background-color: #050d14; border: 1px solid #0a3044;"
+                " border-radius: 0px; min-height: 48px; font-size: 11px; letter-spacing: 1px; }"
+                f"QPushButton#preset-btn:hover {{ border-color: {color}88; }}"
+                f"QPushButton#preset-btn:pressed {{ background-color: #071520; }}"
             )
         else:
             self.setText(f"{slot_num}\n—")
             self.setStyleSheet(
-                "QPushButton#preset-btn { color: #2a2a2a; background-color: #141414;"
-                " border: 1px solid #1e1e1e; border-radius: 4px; min-height: 48px;"
+                "QPushButton#preset-btn { color: #0d2233; background-color: #050d14;"
+                " border: 1px solid #08151f; border-radius: 0px; min-height: 48px;"
                 " font-size: 11px; }"
-                "QPushButton#preset-btn:hover { border-color: #333; }"
+                "QPushButton#preset-btn:hover { border-color: #0d3344; }"
             )
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
@@ -772,7 +775,7 @@ class SequenceQueueWidget(QWidget):
             painter.drawRect(block_x, block_y, current_w - 1, block_h - 1)
 
             # Playhead
-            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.setPen(QPen(QColor("#00e5ff"), 2))
             painter.drawLine(playhead_x, block_y, playhead_x, block_y + block_h - 1)
 
             # Label
@@ -782,8 +785,8 @@ class SequenceQueueWidget(QWidget):
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              current_name)
         else:
-            painter.fillRect(block_x, block_y, current_w, block_h, QColor("#111111"))
-            painter.setPen(QPen(QColor("#222222"), 1))
+            painter.fillRect(block_x, block_y, current_w, block_h, QColor("#050d14"))
+            painter.setPen(QPen(QColor("#0a1e2a"), 1))
             painter.drawRect(block_x, block_y, current_w - 1, block_h - 1)
 
         # Queue items
@@ -802,7 +805,7 @@ class SequenceQueueWidget(QWidget):
                 painter.setPen(QPen(QColor(color_hex), 1))
                 painter.drawRect(x, block_y, QUEUE_ITEM_WIDTH - 1, block_h - 1)
 
-                painter.setPen(QColor("#dddddd"))
+                painter.setPen(QColor("#88ccdd"))
                 painter.setFont(QFont(_MONO_FONT, 9))
                 label = name[:8] if loop_i == 0 else f"×{loop_i + 1}"
                 painter.drawText(x + 4, block_y, QUEUE_ITEM_WIDTH - 8, block_h,
@@ -825,7 +828,7 @@ class VJMainWindow(QMainWindow):
         self._bpm_mode = "link"
         self._knobs_enabled = False
 
-        self.setWindowTitle("auto-vj")
+        self.setWindowTitle("[ AUTO-VJ ]")
         self.setMinimumWidth(360)
         self.setStyleSheet(DARK_QSS)
 
@@ -883,22 +886,22 @@ class VJMainWindow(QMainWindow):
         self._apply_state_style("WAITING")
 
         self._bpm_label = QLabel("BPM: —")
-        self._bpm_label.setStyleSheet("color: #70b8e0; font-weight: bold;")
+        self._bpm_label.setStyleSheet("color: #ff9900; font-weight: bold; letter-spacing: 1px;")
 
-        self._link_label = QLabel("Link: —")
-        self._link_label.setStyleSheet("color: #555;")
+        self._link_label = QLabel("LINK: —")
+        self._link_label.setStyleSheet("color: #1a3a4a; letter-spacing: 1px;")
 
-        self._mode_label = QLabel("link")
-        self._mode_label.setStyleSheet("color: #444; font-size: 10px;")
+        self._mode_label = QLabel("LINK")
+        self._mode_label.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
         self._mode_label.setToolTip("BPM mode — press M to cycle")
 
         mode_btn = QPushButton("M")
         mode_btn.setFixedSize(24, 24)
         mode_btn.setToolTip("Cycle BPM mode (link / tap / mic)")
         mode_btn.setStyleSheet(
-            "QPushButton { background:#1a1a1a; border:1px solid #2a2a2a;"
-            " border-radius:3px; color:#555; font-size:10px; }"
-            "QPushButton:hover { color:#aaa; border-color:#444; }"
+            "QPushButton { background:#050d14; border:1px solid #0a1e2a;"
+            " border-radius:0px; color:#1a3a4a; font-size:10px; }"
+            "QPushButton:hover { color:#00e5ff; border-color:#005566; }"
         )
         mode_btn.clicked.connect(self._worker.cycle_bpm_mode)
 
@@ -907,10 +910,10 @@ class VJMainWindow(QMainWindow):
         self._auto_pill.setCheckable(True)
         self._auto_pill.setToolTip("Auto-refill queue with AI prompts (A)")
         self._auto_pill.setStyleSheet(
-            "QPushButton { background:#1a1a1a; border:1px solid #2a2a2a;"
-            " border-radius:3px; color:#444; font-size:10px; font-weight:bold; }"
-            "QPushButton:checked { background:#e0802022; border-color:#e0802066; color:#e08020; }"
-            "QPushButton:hover { border-color:#444; }"
+            "QPushButton { background:#050d14; border:1px solid #0a1e2a;"
+            " border-radius:0px; color:#1a3a4a; font-size:10px; font-weight:bold; letter-spacing:2px; }"
+            "QPushButton:checked { background:#ff990022; border-color:#ff990088; color:#ff9900; }"
+            "QPushButton:hover { border-color:#005566; }"
         )
         self._auto_pill.clicked.connect(self._worker.toggle_auto_mode)
 
@@ -924,17 +927,17 @@ class VJMainWindow(QMainWindow):
         return row
 
     def _build_effect_box(self) -> QGroupBox:
-        box = QGroupBox("EFFECT")
+        box = QGroupBox("[ EFFECT ]")
         layout = QVBoxLayout(box)
         layout.setContentsMargins(8, 10, 8, 6)
         self._effect_label = QLabel("—")
-        self._effect_label.setStyleSheet("color: #666; font-size: 11px;")
+        self._effect_label.setStyleSheet("color: #1a3a4a; font-size: 11px; letter-spacing: 1px;")
         self._effect_label.setWordWrap(True)
         layout.addWidget(self._effect_label)
         return box
 
     def _build_queue_box(self) -> QGroupBox:
-        box = QGroupBox("QUEUE")
+        box = QGroupBox("[ QUEUE ]")
         layout = QVBoxLayout(box)
         layout.setContentsMargins(8, 10, 8, 6)
         self._queue_widget = SequenceQueueWidget(self._worker)
@@ -942,7 +945,7 @@ class VJMainWindow(QMainWindow):
         return box
 
     def _build_controls_box(self) -> QGroupBox:
-        box = QGroupBox("CONTROLS")
+        box = QGroupBox("[ CONTROLS ]")
         row = QHBoxLayout(box)
         row.setContentsMargins(8, 14, 8, 6)
         row.setSpacing(16)
@@ -956,7 +959,7 @@ class VJMainWindow(QMainWindow):
         return box
 
     def _build_presets_box(self) -> QGroupBox:
-        box = QGroupBox("FAVORITES  (1-9)")
+        box = QGroupBox("[ FAVORITES  1-9 ]")
         vl = QVBoxLayout(box)
         vl.setContentsMargins(8, 14, 8, 8)
         vl.setSpacing(6)
@@ -988,11 +991,11 @@ class VJMainWindow(QMainWindow):
     # ── Slot handlers ──────────────────────────────────────────────────────────
 
     def _apply_state_style(self, state: str) -> None:
-        color = STATE_COLORS.get(state, "#555")
+        color = STATE_COLORS.get(state, "#1a3a4a")
         self._state_pill.setStyleSheet(
             f"QLabel#state-pill {{ background-color: {color}22; color: {color};"
-            f" border: 1px solid {color}66; border-radius: 3px;"
-            f" padding: 2px 10px; font-weight: bold; font-size: 11px; }}"
+            f" border: 1px solid {color}88; border-radius: 0px;"
+            f" padding: 2px 10px; font-weight: bold; font-size: 11px; letter-spacing: 3px; }}"
         )
         self._state_pill.setText(state)
 
@@ -1002,11 +1005,11 @@ class VJMainWindow(QMainWindow):
     def _on_effect(self, prompt: str, cmd: object) -> None:
         cmd = dict(cmd)  # type: ignore[arg-type]
         name = cmd.get("effect", "?")
-        color = EFFECT_COLORS.get(name, "#d4d4d4")
+        color = EFFECT_COLORS.get(name, "#88ccdd")
         text = _fmt_effect(cmd)
         self._effect_label.setText(
-            f"<span style='color:{color};font-weight:bold;'>{name}</span>"
-            f"  <span style='color:#555;font-size:10px;'>{text[len(name):].strip()}</span>"
+            f"<span style='color:{color};font-weight:bold;letter-spacing:2px;'>{name.upper()}</span>"
+            f"  <span style='color:#1a3a4a;font-size:10px;'>{text[len(name):].strip()}</span>"
         )
         self._knobs_enabled = True
         params = cmd.get("params", {})
@@ -1029,16 +1032,16 @@ class VJMainWindow(QMainWindow):
 
     def _on_link(self, tempo: float, peers: int) -> None:
         peers_str = f"{peers} peer{'s' if peers != 1 else ''}" if peers else "solo"
-        self._link_label.setText(f"Link {tempo:.1f}  [{peers_str}]")
+        self._link_label.setText(f"LINK {tempo:.1f}  [{peers_str}]")
 
     def _on_bpm_mode(self, mode: str) -> None:
         self._bpm_mode = mode
-        self._mode_label.setText(mode)
+        self._mode_label.setText(mode.upper())
 
     def _on_worker_error(self, msg: str) -> None:
         self._apply_state_style("WAITING")
         self._effect_label.setText(
-            f"<span style='color:#cc3333;'>Worker crashed — see terminal</span>"
+            f"<span style='color:#ff2200;letter-spacing:2px;'>[ SYSTEM FAILURE — CHECK TERMINAL ]</span>"
         )
         dlg = QMessageBox(self)
         dlg.setWindowTitle("auto-vj — worker error")
