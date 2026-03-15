@@ -42,7 +42,7 @@ FINGERPRINT_HISTORY_LEN = 16     # steps kept in fingerprint history deque
 COMPARISON_OFFSET       = 10     # compare vs ≈1 s ago (10 × 0.10 s)
 
 NOVELTY_EMA_ALPHA = 0.35         # EMA weight for new novelty values (lower = smoother)
-NOVELTY_THRESHOLD = 0.10         # smoothed novelty threshold → change detected
+NOVELTY_THRESHOLD = 0.20         # smoothed novelty threshold → change detected
 NOVELTY_DISPLAY_MAX = NOVELTY_THRESHOLD * 2  # novelty value that fills the bar
 MINOR_MIN_SPACING_BEATS = 8    # min beats between minor events (≈2 bars)
 MAJOR_MIN_SPACING_BEATS = 16   # min beats between major events (≈4 bars)

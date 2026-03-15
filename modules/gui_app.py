@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -114,6 +115,12 @@ TIER_COLORS: dict[str, str] = {
     "major": "#ffcc00",   # yellow
     "drop":  "#ff4400",   # orange-red
 }
+
+DEBUG_LOG_MAX_LINES: int = 200
+DEBUG_LOG_VISIBLE_LINES: int = 8
+DEBUG_LOG_LINE_HEIGHT_PX: int = 16
+DEBUG_LOG_FONT_SIZE_PX: int = 10
+DEBUG_LOG_DIM_COLOR: str = "#1a3a4a"
 
 STATE_COLORS: dict[str, str] = {
     "WAITING":      "#1a3a4a",
@@ -1091,6 +1098,8 @@ class VJMainWindow(QMainWindow):
         root.addWidget(self._build_queue_box())
         root.addWidget(self._build_controls_box())
         root.addWidget(self._build_presets_box())
+        root.addWidget(self._build_debug_box())
+        self._debug_log_lines: int = 0
 
         # Wire worker signals
         worker.status_changed.connect(self._on_status)
@@ -1299,6 +1308,34 @@ class VJMainWindow(QMainWindow):
         vl.addLayout(star_row)
         return box
 
+    def _build_debug_box(self) -> QGroupBox:
+        box = QGroupBox("[ DEBUG ]")
+        vl = QVBoxLayout(box)
+        vl.setContentsMargins(8, 10, 8, 6)
+        vl.setSpacing(4)
+
+        self._debug_log = QTextEdit()
+        self._debug_log.setReadOnly(True)
+        self._debug_log.setFixedHeight(DEBUG_LOG_VISIBLE_LINES * DEBUG_LOG_LINE_HEIGHT_PX)
+        self._debug_log.setStyleSheet(
+            f'QTextEdit {{ background-color: #030a0e; color: {DEBUG_LOG_DIM_COLOR};'
+            f' border: 1px solid #0d3344; border-radius: 0px;'
+            f' font-family: "{_MONO_FONT}"; font-size: {DEBUG_LOG_FONT_SIZE_PX}px; }}'
+        )
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedHeight(20)
+        clear_btn.setStyleSheet(
+            "QPushButton { background:#050d14; color:#1a3a4a;"
+            " border:1px solid #0a1e2a; border-radius:0px; font-size:10px; }"
+            "QPushButton:hover { color:#00e5ff; border-color:#005566; }"
+        )
+        clear_btn.clicked.connect(self._clear_debug_log)
+
+        vl.addWidget(self._debug_log)
+        vl.addWidget(clear_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        return box
+
     # ── Slot handlers ──────────────────────────────────────────────────────────
 
     def _apply_state_style(self, state: str) -> None:
@@ -1378,6 +1415,38 @@ class VJMainWindow(QMainWindow):
         )
         self._novelty_value.setText(f"{e.novelty:.2f}")
         self._novelty_value.setStyleSheet(f"color: {bar_color}; font-size: 10px; letter-spacing: 1px;")
+
+        # ── Debug log ──────────────────────────────────────────────────────────
+        if e.detected_tier is not None:
+            tier_te = e.tiers.get(e.detected_tier)
+            event_beat = (
+                self._worker.get_current_beat() - tier_te.beats_since_change
+                if tier_te is not None
+                else self._worker.get_current_beat()
+            )
+            tier_color = TIER_COLORS.get(e.detected_tier, DEBUG_LOG_DIM_COLOR)
+            line = (
+                f"<span style='color:{DEBUG_LOG_DIM_COLOR};'>b{event_beat:07.2f}</span>"
+                f"  <span style='color:{tier_color}; font-weight:bold;'>"
+                f"{e.detected_tier.upper()}</span>"
+                f"  <span style='color:{DEBUG_LOG_DIM_COLOR};'>nov={e.novelty:.3f}</span>"
+            )
+            self._debug_log.append(line)
+            self._debug_log_lines += 1
+            if self._debug_log_lines > DEBUG_LOG_MAX_LINES:
+                cursor = self._debug_log.textCursor()
+                cursor.movePosition(cursor.MoveOperation.Start)
+                cursor.select(cursor.SelectionType.BlockUnderCursor)
+                cursor.removeSelectedText()
+                cursor.deleteChar()
+                self._debug_log_lines -= 1
+            self._debug_log.verticalScrollBar().setValue(
+                self._debug_log.verticalScrollBar().maximum()
+            )
+
+    def _clear_debug_log(self) -> None:
+        self._debug_log.clear()
+        self._debug_log_lines = 0
 
     def _update_countdown(self) -> None:
         """Recompute the beats-to-change countdown every 50 ms for smooth display.
