@@ -8,6 +8,8 @@ from typing import Callable
 import numpy as np
 import sounddevice as sd
 
+from modules.audio_level import AUDIO_DEVICE_ID
+
 SAMPLERATE = 44100
 HOP_SIZE = 512         # ~11.6 ms per hop at 44.1 kHz
 BUFFER_SECS = 20       # seconds of audio kept for analysis
@@ -72,6 +74,7 @@ class MicBeatDetector:
         self._running = False
         self._chunk_subscribers: list[Callable[[np.ndarray], None]] = []
         self._prev_bpm: float | None = None
+        self._device_id: int | None = None
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -83,10 +86,11 @@ class MicBeatDetector:
         """
         self._chunk_subscribers.append(cb)
 
-    def start(self) -> None:
+    def start(self, device_id: int | None = None) -> None:
         if self._running:
             return
         self._running = True
+        self._device_id = device_id
         self._open_stream()
         self._schedule_analysis()
 
@@ -115,6 +119,7 @@ class MicBeatDetector:
         if self._stream is not None:
             return
         self._stream = sd.InputStream(
+            device=self._device_id,
             samplerate=SAMPLERATE,
             channels=1,
             dtype="float32",

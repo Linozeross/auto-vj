@@ -1,10 +1,37 @@
 """Real-time microphone amplitude tracker (RMS, auto-normalized)."""
 from __future__ import annotations
 
+import os
 import threading
 
 import numpy as np
 import sounddevice as sd
+from dotenv import load_dotenv
+
+load_dotenv()
+
+AUDIO_DEVICE_NAME = os.getenv("AUDIO_DEVICE", "").strip()
+
+
+def _resolve_device(name: str) -> int | None:
+    """Return the first device index whose name contains *name* (case-insensitive).
+
+    Returns None when *name* is empty (use sounddevice default).
+    Raises RuntimeError if a name was given but no matching device was found.
+    """
+    if not name:
+        return None
+    for i, dev in enumerate(sd.query_devices()):
+        if name.lower() in dev["name"].lower() and dev["max_input_channels"] > 0:
+            return i
+    raise RuntimeError(
+        f"AUDIO_DEVICE '{name}' not found. "
+        "Run 'python -c \"import sounddevice as sd; [print(i, d) for i, d in enumerate(sd.query_devices())]\"' "
+        "to list available devices."
+    )
+
+
+AUDIO_DEVICE_ID: int | None = _resolve_device(AUDIO_DEVICE_NAME)
 
 SAMPLERATE = 44100
 HOP_SIZE = 512
@@ -37,6 +64,7 @@ class AudioLevel:
         if self._stream is not None:
             return
         self._stream = sd.InputStream(
+            device=AUDIO_DEVICE_ID,
             samplerate=SAMPLERATE,
             channels=1,
             dtype="float32",

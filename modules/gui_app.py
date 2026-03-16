@@ -49,6 +49,7 @@ import numpy as np
 import sounddevice as sd
 
 from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
+from modules.audio_level import AUDIO_DEVICE_NAME, AUDIO_DEVICE_ID
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
 from modules.drop_estimator import DropEstimator, StructureEstimate, NOVELTY_DISPLAY_MAX
@@ -767,10 +768,10 @@ class VJWorker(QThread):
         self.set_bpm(bpm)
 
     def cycle_bpm_mode(self) -> None:
-        order = [BpmMode.LINK, BpmMode.TAP, BpmMode.MIC]
+        order = [BpmMode.LINK, BpmMode.TAP, BpmMode.MIC, BpmMode.AUDIO]
         next_mode = order[(order.index(self._bpm_mode) + 1) % len(order)]
 
-        if self._bpm_mode is BpmMode.MIC and self._beat_detector:
+        if self._bpm_mode in (BpmMode.MIC, BpmMode.AUDIO) and self._beat_detector:
             self._beat_detector.stop()
             if self._drop_estimator:
                 self._drop_estimator.stop()
@@ -778,8 +779,9 @@ class VJWorker(QThread):
         self._bpm_mode = next_mode
         self._tap_times = []
 
-        if self._bpm_mode is BpmMode.MIC and self._beat_detector:
-            self._beat_detector.start()
+        if self._bpm_mode in (BpmMode.MIC, BpmMode.AUDIO) and self._beat_detector:
+            dev_id = AUDIO_DEVICE_ID if self._bpm_mode is BpmMode.AUDIO else None
+            self._beat_detector.start(device_id=dev_id)
             if self._drop_estimator:
                 self._drop_estimator.start()
 
@@ -1384,7 +1386,14 @@ class VJMainWindow(QMainWindow):
 
     def _on_bpm_mode(self, mode: str) -> None:
         self._bpm_mode = mode
-        self._mode_label.setText(mode.upper())
+        if mode == "audio" and AUDIO_DEVICE_NAME:
+            # Show truncated device name if too long
+            name = AUDIO_DEVICE_NAME
+            if len(name) > 12:
+                name = name[:10] + ".."
+            self._mode_label.setText(name.upper())
+        else:
+            self._mode_label.setText(mode.upper())
 
     def _on_structure(self, est: object) -> None:
         e: StructureEstimate = est  # type: ignore[assignment]

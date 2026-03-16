@@ -11,6 +11,7 @@ class BpmMode(Enum):
     LINK = "link"
     TAP  = "tap"
     MIC  = "mic"
+    AUDIO = "audio"
 
 
 class LinkClock:

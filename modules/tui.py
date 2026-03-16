@@ -321,19 +321,17 @@ class VJApp(App):
                 self._link_clock.set_bpm(float(vj_response.bpm))
                 self.post_message(BpmChanged(float(vj_response.bpm)))
 
-            if vj_response.type == "effect" and vj_response.effect is not None:
-                seq = sequence_from_effect_cmd(vj_response.effect.model_dump())
-                self._enqueue(seq)
-                self.post_message(StatusChanged("LIVE"))
-                self.post_message(EffectActivated(text, vj_response.effect.model_dump()))
-
-            elif vj_response.type == "sequences" and vj_response.sequences:
+            if vj_response.sequences:
                 for s in vj_response.sequences:
                     self._enqueue(sequence_from_dict(s.model_dump()))
                 self.post_message(StatusChanged("LIVE"))
                 # Show first step of first sequence in history
                 first_step = vj_response.sequences[0].steps[0]
-                self.post_message(EffectActivated(text, {
+                ctx = vj_response.section_context
+                prompt_label = (
+                    f"{ctx.palette_name} / {ctx.energy}" if ctx else vj_response.sequences[0].name
+                )
+                self.post_message(EffectActivated(prompt_label, {
                     "effect": first_step.effect,
                     "params": first_step.params,
                     "filters": [f.model_dump() for f in first_step.filters],
@@ -383,17 +381,19 @@ class VJApp(App):
     # ── actions ────────────────────────────────────────────────────────────────
 
     def action_cycle_bpm_mode(self) -> None:
-        order = [BpmMode.LINK, BpmMode.TAP, BpmMode.MIC]
+        order = [BpmMode.LINK, BpmMode.TAP, BpmMode.MIC, BpmMode.AUDIO]
         next_mode = order[(order.index(self._bpm_mode) + 1) % len(order)]
 
-        if self._bpm_mode is BpmMode.MIC:
+        if self._bpm_mode in (BpmMode.MIC, BpmMode.AUDIO):
             self._beat_detector.stop()
 
         self._bpm_mode = next_mode
         self._tap_times = []
 
-        if self._bpm_mode is BpmMode.MIC:
-            self._beat_detector.start()
+        if self._bpm_mode in (BpmMode.MIC, BpmMode.AUDIO):
+            from modules.audio_level import AUDIO_DEVICE_ID
+            dev_id = AUDIO_DEVICE_ID if self._bpm_mode is BpmMode.AUDIO else None
+            self._beat_detector.start(device_id=dev_id)
 
         self.post_message(BpmModeChanged(next_mode))
 
