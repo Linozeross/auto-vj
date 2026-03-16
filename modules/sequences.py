@@ -7,6 +7,7 @@ BEATS_PER_BAR: int = 4
 DEFAULT_DURATION_BARS: float = 4.0
 MAX_STEP_DURATION_BARS: float = 1.0
 DEFAULT_REPEATS: int = 1
+MANUAL_EFFECT_REPEATS: int = 1_000_000
 PHRASE_BEATS: int = BEATS_PER_BAR * 4   # 4 bars = 16 beats
 MIN_REPEATS: int = 1
 STEP_FREEZE_EPSILON: float = 1e-9
@@ -107,5 +108,19 @@ def sequence_from_effect_cmd(cmd: dict) -> Sequence:
     effect = effect_from_dict(cmd)
     return Sequence(
         steps=[(effect, DEFAULT_DURATION_BARS * BEATS_PER_BAR)],
+        name=cmd.get("effect", ""),
+    )
+
+
+def looping_sequence_from_effect_cmd(cmd: dict) -> Sequence:
+    """Wrap a single EffectCommand dict as a practically unbounded loop.
+
+    Used for manual control surfaces like presets, knob tweaks, and the effect lab
+    so dynamic effects do not freeze on a dark end-frame after a few bars.
+    """
+    effect = effect_from_dict(cmd)
+    return Sequence(
+        steps=[(effect, DEFAULT_DURATION_BARS * BEATS_PER_BAR)],
+        repeats=MANUAL_EFFECT_REPEATS,
         name=cmd.get("effect", ""),
     )

@@ -21,12 +21,15 @@ import sys
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QKeyEvent, QAction, QPainter, QColor, QPen, QFont
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QDial,
     QGridLayout,
     QGroupBox,
@@ -38,6 +41,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QTextEdit,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -48,14 +52,22 @@ from pydantic import ValidationError
 import numpy as np
 import sounddevice as sd
 
-from modules.artnet_renderer import ArtNetRenderer, MultiRenderer
+from modules.artnet_renderer import ArtNetRenderer, MultiRenderer, DEFAULT_ARTNET_FPS
 from modules.audio_level import AUDIO_DEVICE_NAME, AUDIO_DEVICE_ID
 from modules.beat_detector import MicBeatDetector
 from modules.bpm import BpmMode, LinkClock
 from modules.drop_estimator import DropEstimator, StructureEstimate, NOVELTY_DISPLAY_MAX
-from modules.effects import VJResponse, SectionContextCommand
+from modules.effects import PALETTES, VJResponse, SectionContextCommand
 from modules.recorder import SAMPLE_RATE, CHANNELS, audio_to_wav_b64
-from modules.sequences import Sequence, sequence_from_dict, sequence_from_dict_capped, sequence_from_effect_cmd, PHRASE_BEATS, BEATS_PER_BAR
+from modules.sequences import (
+    Sequence,
+    sequence_from_dict,
+    sequence_from_dict_capped,
+    sequence_from_effect_cmd,
+    looping_sequence_from_effect_cmd,
+    PHRASE_BEATS,
+    BEATS_PER_BAR,
+)
 
 load_dotenv()
 
@@ -90,6 +102,7 @@ STRUCTURE_BEATS_WINDOW = 1.0     # advance queue when beats_to_change falls with
 DROP_MARKER_COLOR = "#ffcc00"    # colour of the predicted-drop marker in the queue widget
 AUTO_QUEUE_STABLE_MAX: int = 2   # max stable sequences to buffer ahead (keeps queue lean near drops)
 AUTO_HISTORY_MAX_TURNS: int = 6  # trim GPT history to prevent context-window bloat
+WLED_TELEMETRY_INTERVAL_SECS: float = 1.0
 
 # Effects that use "rate" instead of "speed"
 RATE_EFFECTS = {"pulse"}
@@ -141,6 +154,30 @@ EFFECT_COLORS: dict[str, str] = {
     "beat_pulse":   "#ffcc00",
 }
 
+LAB_COLOR_PRESETS: list[tuple[str, tuple[int, int, int]]] = [
+    ("Red", (255, 48, 48)),
+    ("Amber", (255, 140, 32)),
+    ("Gold", (255, 210, 0)),
+    ("Lime", (90, 255, 80)),
+    ("Cyan", (0, 220, 255)),
+    ("Blue", (40, 110, 255)),
+    ("Magenta", (255, 0, 180)),
+    ("White", (255, 255, 255)),
+]
+
+LAB_EFFECT_SPECS: list[dict[str, object]] = [
+    {"key": "solid", "label": "Solid"},
+    {"key": "pulse", "label": "Pulse", "params": {"rate": 1.0}},
+    {"key": "rainbow", "label": "Rainbow", "params": {"speed": 1.0}},
+    {"key": "chase", "label": "Chase", "params": {"speed": 1.0, "tail": 18}},
+    {"key": "twinkle", "label": "Twinkle", "params": {"density": 0.35, "speed": 1.3}},
+    {"key": "plasma", "label": "Plasma", "params": {"speed": 1.0, "scale": 1.3}},
+    {"key": "palette_wave", "label": "Palette", "params": {"speed": 0.8, "stretch": 1.0}},
+    {"key": "beat_pulse", "label": "Beat", "params": {"sharpness": 4.0}},
+    {"key": "strip_solid", "label": "Strip Solid", "params": {"speed": 0.15}},
+    {"key": "strip_chase", "label": "Strip Chase", "params": {"speed": 1.0, "tail": 2}},
+]
+
 # Qt QSS accepts only a single font-family value (no comma fallback lists).
 _MONO_FONT = "Menlo" if platform.system() == "Darwin" else "Consolas"
 
@@ -184,6 +221,36 @@ def _parse_artnet_nodes(raw: str) -> list[tuple[str, int]]:
                 nodes.append((part, LED_COUNT))
         return nodes
     return [(ARTNET_IP, LED_COUNT)]
+
+
+def _fetch_wled_status(ip: str, timeout: float = 0.6) -> dict:
+    url = f"http://{ip}/json/si"
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        payload = json.load(response)
+
+    info = payload.get("info", {})
+    leds = info.get("leds", {})
+    wifi = info.get("wifi", {})
+    return {
+        "ip": ip,
+        "ok": True,
+        "live": bool(info.get("live", False)),
+        "source": info.get("lip", ""),
+        "fps": float(leds.get("fps", 0.0) or 0.0),
+        "freeheap": int(info.get("freeheap", 0) or 0),
+        "signal": int(wifi.get("signal", 0) or 0),
+    }
+
+
+def _safe_fetch_wled_status(ip: str) -> dict:
+    try:
+        return _fetch_wled_status(ip)
+    except (TimeoutError, OSError, ValueError, urllib.error.URLError) as exc:
+        return {
+            "ip": ip,
+            "ok": False,
+            "error": str(exc),
+        }
 
 
 def _fmt_effect(cmd: dict) -> str:
@@ -335,12 +402,15 @@ class VJWorker(QThread):
     worker_error        = pyqtSignal(str)            # fatal error message
     auto_mode_changed   = pyqtSignal(bool)
     structure_changed   = pyqtSignal(object)         # StructureEstimate
+    renderer_stats_changed = pyqtSignal(object)      # list[dict]
+    wled_status_changed = pyqtSignal(object)         # list[dict]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._link_clock: LinkClock | None = None
         self._renderer: MultiRenderer | None = None
+        self._nodes: list[tuple[str, int]] = []
         self._current_cmd: dict | None = None
         self._history: list[dict] = []
         self._bpm_mode: BpmMode = BpmMode.LINK
@@ -439,16 +509,17 @@ class VJWorker(QThread):
         # holding a sounddevice stream that conflicts with PTT recording.
         # (Start is triggered by cycle_bpm_mode when user switches to MIC.)
 
-        nodes = _parse_artnet_nodes(ARTNET_NODES_RAW)
+        self._nodes = _parse_artnet_nodes(ARTNET_NODES_RAW)
         self._renderer = MultiRenderer([
-            ArtNetRenderer(ip, leds, link_clock=self._link_clock)
-            for ip, leds in nodes
+            ArtNetRenderer(ip, leds, fps=DEFAULT_ARTNET_FPS, link_clock=self._link_clock)
+            for ip, leds in self._nodes
         ])
 
         await asyncio.gather(
             self._ptt_loop(),
             self._renderer.render_loop(),
             self._queue_watcher(),
+            self._telemetry_loop(),
         )
 
     # ── Sequence queue management ──────────────────────────────────────────────
@@ -594,6 +665,20 @@ class VJWorker(QThread):
             return 0.0
         return self._link_clock.beat
 
+    async def _telemetry_loop(self) -> None:
+        while True:
+            if self._renderer is not None:
+                self.renderer_stats_changed.emit(self._renderer.get_stats())
+
+            if self._nodes:
+                statuses = await asyncio.gather(*(
+                    asyncio.to_thread(_safe_fetch_wled_status, ip)
+                    for ip, _ in self._nodes
+                ))
+                self.wled_status_changed.emit(statuses)
+
+            await asyncio.sleep(WLED_TELEMETRY_INTERVAL_SECS)
+
     async def _auto_queue_refill(self) -> None:
         """Generate a new sequence via context-aware prompt and enqueue it."""
         try:
@@ -716,12 +801,29 @@ class VJWorker(QThread):
                 self._activate_and_notify(cmd), self._loop
             )
 
+    def audition_effect(self, cmd: dict) -> None:
+        """Called from Qt thread — immediate swap for debugging/auditioning."""
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._audition_and_notify(cmd), self._loop
+            )
+
     async def _activate_and_notify(self, cmd: dict) -> None:
-        seq = sequence_from_effect_cmd(cmd)
+        seq = looping_sequence_from_effect_cmd(cmd)
         await self._enqueue_async(seq)
         self._current_cmd = cmd
         self.status_changed.emit("LIVE")
         self.effect_activated.emit("preset", cmd)
+        if cmd.get("bpm") is not None:
+            self._link_clock.set_bpm(float(cmd["bpm"]))
+            self.bpm_changed.emit(float(cmd["bpm"]))
+
+    async def _audition_and_notify(self, cmd: dict) -> None:
+        seq = looping_sequence_from_effect_cmd(cmd)
+        await self._replace_current_async(seq)
+        self._current_cmd = cmd
+        self.status_changed.emit("LIVE")
+        self.effect_activated.emit("effect-lab", cmd)
         if cmd.get("bpm") is not None:
             self._link_clock.set_bpm(float(cmd["bpm"]))
             self.bpm_changed.emit(float(cmd["bpm"]))
@@ -731,7 +833,7 @@ class VJWorker(QThread):
         if self._current_cmd and self._loop:
             cmd = _apply_speed(self._current_cmd, speed)
             self._current_cmd = cmd
-            seq = sequence_from_effect_cmd(cmd)
+            seq = looping_sequence_from_effect_cmd(cmd)
             asyncio.run_coroutine_threadsafe(self._replace_current_async(seq), self._loop)
 
     def apply_brightness(self, brightness: float) -> None:
@@ -739,7 +841,7 @@ class VJWorker(QThread):
         if self._current_cmd and self._loop:
             cmd = _apply_brightness(self._current_cmd, brightness)
             self._current_cmd = cmd
-            seq = sequence_from_effect_cmd(cmd)
+            seq = looping_sequence_from_effect_cmd(cmd)
             asyncio.run_coroutine_threadsafe(self._replace_current_async(seq), self._loop)
 
     def set_bpm(self, bpm: float) -> None:
@@ -1074,6 +1176,184 @@ class SequenceQueueWidget(QWidget):
         painter.end()
 
 
+class EffectLabWidget(QWidget):
+    def __init__(self, worker: VJWorker, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._worker = worker
+        self._selected_effect = str(LAB_EFFECT_SPECS[0]["key"])
+        self._selected_color = LAB_COLOR_PRESETS[0][1]
+        self._selected_palette = next(iter(PALETTES))
+        self._effect_buttons: dict[str, QPushButton] = {}
+        self._color_buttons: dict[str, QPushButton] = {}
+        self._palette_buttons: dict[str, QPushButton] = {}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        intro = QLabel(
+            "Manual effect browser for debugging. Click an effect, then colors or palettes,"
+            " and the current selection is swapped in immediately."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #88ccdd; font-size: 10px; letter-spacing: 1px;")
+        root.addWidget(intro)
+
+        root.addWidget(self._build_effects_box())
+        root.addWidget(self._build_colors_box())
+        root.addWidget(self._build_palettes_box())
+        root.addWidget(self._build_preview_box())
+        root.addStretch()
+
+        self._apply_selection()
+
+    def _build_effects_box(self) -> QGroupBox:
+        box = QGroupBox("[ EFFECTS ]")
+        grid = QGridLayout(box)
+        grid.setContentsMargins(8, 14, 8, 8)
+        grid.setSpacing(6)
+
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+
+        for idx, spec in enumerate(LAB_EFFECT_SPECS):
+            key = str(spec["key"])
+            label = str(spec["label"])
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _checked=False, effect_key=key: self._select_effect(effect_key))
+            btn.setStyleSheet(
+                "QPushButton { background:#050d14; color:#88ccdd; border:1px solid #0d3344;"
+                " border-radius:0px; min-height:30px; padding:4px 8px; letter-spacing:1px; }"
+                "QPushButton:checked { background:#00e5ff22; color:#00e5ff; border-color:#00e5ff; }"
+                "QPushButton:hover { border-color:#00e5ff; }"
+            )
+            if key == self._selected_effect:
+                btn.setChecked(True)
+            self._effect_buttons[key] = btn
+            group.addButton(btn)
+            grid.addWidget(btn, idx // 3, idx % 3)
+        return box
+
+    def _build_colors_box(self) -> QGroupBox:
+        box = QGroupBox("[ COLORS ]")
+        row = QHBoxLayout(box)
+        row.setContentsMargins(8, 14, 8, 8)
+        row.setSpacing(6)
+
+        for label, rgb in LAB_COLOR_PRESETS:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setStyleSheet(self._color_button_style(rgb, rgb == self._selected_color))
+            btn.clicked.connect(lambda _checked=False, color=rgb: self._select_color(color))
+            self._color_buttons[label] = btn
+            row.addWidget(btn)
+        return box
+
+    def _build_palettes_box(self) -> QGroupBox:
+        box = QGroupBox("[ PALETTES ]")
+        grid = QGridLayout(box)
+        grid.setContentsMargins(8, 14, 8, 8)
+        grid.setSpacing(6)
+
+        for idx, palette_name in enumerate(PALETTES):
+            btn = QPushButton(palette_name)
+            btn.setCheckable(True)
+            btn.setChecked(palette_name == self._selected_palette)
+            btn.setStyleSheet(
+                "QPushButton { background:#050d14; color:#88ccdd; border:1px solid #0d3344;"
+                " border-radius:0px; min-height:26px; padding:4px 8px; letter-spacing:1px; }"
+                "QPushButton:checked { background:#ff990022; color:#ff9900; border-color:#ff9900; }"
+                "QPushButton:hover { border-color:#ff9900; }"
+            )
+            btn.clicked.connect(lambda _checked=False, name=palette_name: self._select_palette(name))
+            self._palette_buttons[palette_name] = btn
+            grid.addWidget(btn, idx // 4, idx % 4)
+        return box
+
+    def _build_preview_box(self) -> QGroupBox:
+        box = QGroupBox("[ CURRENT TEST CMD ]")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 14, 8, 8)
+        layout.setSpacing(6)
+
+        self._lab_hint = QLabel("")
+        self._lab_hint.setWordWrap(True)
+        self._lab_hint.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
+
+        self._lab_cmd = QTextEdit()
+        self._lab_cmd.setReadOnly(True)
+        self._lab_cmd.setFixedHeight(110)
+        self._lab_cmd.setStyleSheet(
+            f'QTextEdit {{ background-color: #030a0e; color: #88ccdd; border: 1px solid #0d3344;'
+            f' border-radius: 0px; font-family: "{_MONO_FONT}"; font-size: 10px; }}'
+        )
+
+        layout.addWidget(self._lab_hint)
+        layout.addWidget(self._lab_cmd)
+        return box
+
+    def _color_button_style(self, rgb: tuple[int, int, int], selected: bool) -> str:
+        r, g, b = rgb
+        fg = "#030a0e" if (r + g + b) > 420 else "#d7f7ff"
+        border = "#ffffff" if selected else "#0d3344"
+        return (
+            f"QPushButton {{ background: rgb({r}, {g}, {b}); color: {fg}; border: 2px solid {border};"
+            " border-radius: 0px; min-height: 28px; padding: 4px 8px; font-weight: bold; }}"
+            "QPushButton:hover { border-color: #ffffff; }"
+        )
+
+    def _select_effect(self, effect_key: str) -> None:
+        self._selected_effect = effect_key
+        self._apply_selection()
+
+    def _select_color(self, rgb: tuple[int, int, int]) -> None:
+        self._selected_color = rgb
+        for label, preset_rgb in LAB_COLOR_PRESETS:
+            self._color_buttons[label].setStyleSheet(
+                self._color_button_style(preset_rgb, preset_rgb == rgb)
+            )
+        self._apply_selection()
+
+    def _select_palette(self, palette_name: str) -> None:
+        self._selected_palette = palette_name
+        self._selected_effect = "palette_wave"
+        effect_btn = self._effect_buttons.get("palette_wave")
+        if effect_btn is not None:
+            effect_btn.setChecked(True)
+        for name, btn in self._palette_buttons.items():
+            btn.setChecked(name == palette_name)
+        self._apply_selection()
+
+    def _build_current_cmd(self) -> tuple[dict, str]:
+        r, g, b = self._selected_color
+        spec = next(spec for spec in LAB_EFFECT_SPECS if spec["key"] == self._selected_effect)
+        params = dict(spec.get("params", {}))
+        hint = "Using representative defaults from the current renderer."
+
+        if self._selected_effect in {"solid", "pulse", "chase", "twinkle", "beat_pulse", "strip_chase"}:
+            params.update({"r": r, "g": g, "b": b})
+            hint = "Color controls this effect directly."
+        elif self._selected_effect == "palette_wave":
+            params["palette"] = self._selected_palette
+            hint = "Palette buttons drive this effect; color buttons are ignored."
+        elif self._selected_effect in {"rainbow", "plasma", "strip_solid"}:
+            hint = "This effect ignores manual RGB color and uses its own internal color logic."
+
+        cmd = {
+            "effect": self._selected_effect,
+            "params": params,
+            "filters": [],
+        }
+        return cmd, hint
+
+    def _apply_selection(self) -> None:
+        cmd, hint = self._build_current_cmd()
+        self._lab_hint.setText(hint)
+        self._lab_cmd.setPlainText(json.dumps(cmd, indent=2))
+        self._worker.audition_effect(cmd)
+
+
 # ── Main window ────────────────────────────────────────────────────────────────
 
 class VJMainWindow(QMainWindow):
@@ -1094,13 +1374,32 @@ class VJMainWindow(QMainWindow):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
-        root.addLayout(self._build_status_bar())
-        root.addWidget(self._build_effect_box())
-        root.addWidget(self._build_structure_box())
-        root.addWidget(self._build_queue_box())
-        root.addWidget(self._build_controls_box())
-        root.addWidget(self._build_presets_box())
-        root.addWidget(self._build_debug_box())
+        tabs = QTabWidget()
+        tabs.setStyleSheet(
+            "QTabWidget::pane { border: 1px solid #0d3344; top: -1px; }"
+            "QTabBar::tab { background: #050d14; color: #1a3a4a; border: 1px solid #0a1e2a;"
+            " border-bottom: none; padding: 6px 12px; min-width: 100px; letter-spacing: 1px; }"
+            "QTabBar::tab:selected { color: #00e5ff; border-color: #0d3344; background: #071520; }"
+            "QTabBar::tab:hover { color: #88ccdd; }"
+        )
+
+        main_page = QWidget()
+        main_root = QVBoxLayout(main_page)
+        main_root.setContentsMargins(8, 8, 8, 8)
+        main_root.setSpacing(8)
+        main_root.addLayout(self._build_status_bar())
+        main_root.addWidget(self._build_effect_box())
+        main_root.addWidget(self._build_structure_box())
+        main_root.addWidget(self._build_queue_box())
+        main_root.addWidget(self._build_telemetry_box())
+        main_root.addWidget(self._build_controls_box())
+        main_root.addWidget(self._build_presets_box())
+        main_root.addWidget(self._build_debug_box())
+
+        self._effect_lab = EffectLabWidget(worker)
+        tabs.addTab(main_page, "Main")
+        tabs.addTab(self._effect_lab, "Effect Lab")
+        root.addWidget(tabs)
         self._debug_log_lines: int = 0
 
         # Wire worker signals
@@ -1113,6 +1412,8 @@ class VJMainWindow(QMainWindow):
         worker.worker_error.connect(self._on_worker_error)
         worker.auto_mode_changed.connect(self._on_auto_mode)
         worker.structure_changed.connect(self._on_structure)
+        worker.renderer_stats_changed.connect(self._on_renderer_stats)
+        worker.wled_status_changed.connect(self._on_wled_status)
 
         self._bpm_knob_timer = QTimer(self)
         self._bpm_knob_timer.setSingleShot(True)
@@ -1266,6 +1567,24 @@ class VJMainWindow(QMainWindow):
         layout.addWidget(self._queue_widget)
         return box
 
+    def _build_telemetry_box(self) -> QGroupBox:
+        box = QGroupBox("[ TELEMETRY ]")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 10, 8, 6)
+        layout.setSpacing(4)
+
+        self._render_stats_label = QLabel("ARTNET: waiting for samples...")
+        self._render_stats_label.setWordWrap(True)
+        self._render_stats_label.setStyleSheet("color: #88ccdd; font-size: 10px; letter-spacing: 1px;")
+
+        self._wled_status_label = QLabel("WLED: waiting for device telemetry...")
+        self._wled_status_label.setWordWrap(True)
+        self._wled_status_label.setStyleSheet("color: #1a3a4a; font-size: 10px; letter-spacing: 1px;")
+
+        layout.addWidget(self._render_stats_label)
+        layout.addWidget(self._wled_status_label)
+        return box
+
     def _build_controls_box(self) -> QGroupBox:
         box = QGroupBox("[ CONTROLS ]")
         row = QHBoxLayout(box)
@@ -1394,6 +1713,62 @@ class VJMainWindow(QMainWindow):
             self._mode_label.setText(name.upper())
         else:
             self._mode_label.setText(mode.upper())
+
+    def _on_renderer_stats(self, stats_list: object) -> None:
+        stats = [dict(s) for s in stats_list]  # type: ignore[arg-type]
+        if not stats:
+            self._render_stats_label.setText("ARTNET: no renderer active")
+            return
+
+        parts = []
+        for item in stats:
+            ip = item.get("ip", "?")
+            fps = float(item.get("actual_fps", 0.0))
+            target = int(item.get("target_fps", 0))
+            frame_ms = float(item.get("frame_time_ms", 0.0))
+            compute_ms = float(item.get("compute_time_ms", 0.0))
+            send_ms = float(item.get("send_time_ms", 0.0))
+            skipped = int(item.get("frames_skipped", 0))
+            rendered = int(item.get("frames_rendered", 0))
+            payload = int(item.get("payload_bytes", 0))
+            skip_pct = (skipped / rendered * 100.0) if rendered else 0.0
+            kb_per_sec = (payload * fps) / 1024.0
+            parts.append(
+                f"{ip}  {fps:4.1f}/{target} fps  frame {frame_ms:4.1f} ms"
+                f"  cpu {compute_ms:4.1f}  send {send_ms:4.1f}"
+                f"  skip {skip_pct:4.0f}%  ~{kb_per_sec:4.0f} KB/s"
+            )
+        self._render_stats_label.setText("ARTNET: " + " | ".join(parts))
+
+    def _on_wled_status(self, statuses: object) -> None:
+        rows = [dict(item) for item in statuses]  # type: ignore[arg-type]
+        if not rows:
+            self._wled_status_label.setText("WLED: no nodes configured")
+            return
+
+        parts = []
+        ok_seen = False
+        for row in rows:
+            ip = row.get("ip", "?")
+            if row.get("ok"):
+                ok_seen = True
+                fps = float(row.get("fps", 0.0))
+                signal = int(row.get("signal", 0))
+                freeheap = int(row.get("freeheap", 0))
+                live = "LIVE" if row.get("live") else "idle"
+                source = row.get("source") or "?"
+                parts.append(
+                    f"{ip}  {live} {source}  led {fps:4.1f} fps"
+                    f"  wifi {signal}%  heap {freeheap // 1024} KB"
+                )
+            else:
+                parts.append(f"{ip}  offline")
+
+        color = "#88ccdd" if ok_seen else "#ff9900"
+        self._wled_status_label.setStyleSheet(
+            f"color: {color}; font-size: 10px; letter-spacing: 1px;"
+        )
+        self._wled_status_label.setText("WLED: " + " | ".join(parts))
 
     def _on_structure(self, est: object) -> None:
         e: StructureEstimate = est  # type: ignore[assignment]

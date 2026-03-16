@@ -9,7 +9,7 @@ Voice-controlled VJ lighting system. Hold Space, describe a vibe, release — GP
 1. **Hold Space** (or the PTT button in the GUI) to record your voice
 2. **Release** — audio is transcribed by Whisper
 3. **GPT-4o-mini** interprets the description and returns a sequence of LED effects as JSON
-4. Effects render live over **ArtNet** to WLED at 100 fps, beat-time locked to **Ableton Link**
+4. Effects render live over **ArtNet** to WLED at 40 fps by default, beat-time locked to **Ableton Link**
 
 Conversation history is maintained, so relative commands work: *"make it faster"*, *"warmer colours"*, *"add a drop"*.
 
@@ -138,7 +138,7 @@ auto-vj/
 │   ├── effects.py           # Effect + Filter ABCs, all implementations, factory
 │   ├── sequences.py         # Sequence(Effect) — phrase-aligned multi-step playback
 │   ├── bpm.py               # LinkClock — Ableton Link beat source
-│   ├── artnet_renderer.py   # Multi-universe ArtNet send loop (100 fps)
+│   ├── artnet_renderer.py   # Multi-universe ArtNet send loop (40 fps default)
 │   ├── recorder.py          # PTT + Whisper transcription
 │   ├── tui.py               # Textual TUI app
 │   └── gui_app.py           # PyQt6 GUI app

@@ -2,7 +2,7 @@
 import pytest
 from modules.effects import SolidColor, Pulse
 from modules.sequences import (
-    Sequence, sequence_from_dict, sequence_from_effect_cmd,
+    Sequence, sequence_from_dict, sequence_from_effect_cmd, looping_sequence_from_effect_cmd,
     BEATS_PER_BAR, DEFAULT_DURATION_BARS, PHRASE_BEATS,
 )
 
@@ -149,6 +149,12 @@ def test_sequence_from_effect_cmd_single_step():
 def test_sequence_from_effect_cmd_default_repeats():
     seq = sequence_from_effect_cmd({"effect": "rainbow"})
     assert seq.repeats == 1
+
+
+def test_looping_sequence_from_effect_cmd_uses_large_repeat_count():
+    seq = looping_sequence_from_effect_cmd({"effect": "rainbow"})
+    assert seq.repeats > 1
+    assert not seq.is_done(DEFAULT_DURATION_BARS * BEATS_PER_BAR)
 
 
 # ── 9. Empty sequence returns black ──────────────────────────────────────────
