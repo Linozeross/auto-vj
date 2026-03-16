@@ -1,4 +1,6 @@
 import asyncio
+import socket
+import struct
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
@@ -8,6 +10,15 @@ from modules.effects import Effect, SolidColor
 
 LEDS_PER_UNIVERSE = 170
 DEFAULT_ARTNET_FPS = 40
+DEFAULT_TEST_RGB = (255, 255, 255)
+DMX_CHANNELS_PER_LED = 3
+CHANNEL_START_INDEX = 1
+ARTNET_PORT = 6454
+ARTNET_HEADER = b"Art-Net\x00"
+ARTNET_OPCODE_DMX = 0x5000
+ARTNET_PROTOCOL_VERSION = 14
+ARTNET_SEQUENCE_DISABLED = 0
+ARTNET_PHYSICAL_PORT = 0
 
 
 @dataclass(slots=True)
@@ -43,6 +54,81 @@ class MultiRenderer:
 
     async def render_loop(self) -> None:
         await asyncio.gather(*(r.render_loop() for r in self._renderers))
+
+
+class StaticArtNetSender:
+    """Send static RGB frames for mapping/calibration without running the render loop."""
+
+    def __init__(
+        self,
+        ip: str,
+        total_leds: int,
+        fps: int = DEFAULT_ARTNET_FPS,
+        port: int = ARTNET_PORT,
+        socket_factory: Callable[..., socket.socket] | None = None,
+    ) -> None:
+        self._ip = ip
+        self._total_leds = total_leds
+        self._fps = fps
+        self._port = port
+        self._socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM) if socket_factory else socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self._universes: list[tuple[int, int, int]] = []
+        remaining = self._total_leds
+        universe_index = 0
+        led_offset = 0
+        while remaining > 0:
+            led_count = min(remaining, LEDS_PER_UNIVERSE)
+            self._universes.append((universe_index, led_offset, led_count))
+            remaining -= led_count
+            led_offset += led_count
+            universe_index += 1
+
+    def send_frame(self, rgb_values: list[int]) -> None:
+        expected_length = self._total_leds * DMX_CHANNELS_PER_LED
+        if len(rgb_values) != expected_length:
+            raise ValueError(f"Expected {expected_length} DMX values, got {len(rgb_values)}")
+        for universe_index, led_offset, led_count in self._universes:
+            start = led_offset * DMX_CHANNELS_PER_LED
+            end = start + led_count * DMX_CHANNELS_PER_LED
+            packet = _artnet_dmx_packet(universe_index, bytes(rgb_values[start:end]))
+            self._socket.sendto(packet, (self._ip, self._port))
+
+    def blackout(self) -> None:
+        self.send_frame([0] * self._total_leds * DMX_CHANNELS_PER_LED)
+
+    def show_leds(
+        self,
+        led_indices: list[int],
+        rgb: tuple[int, int, int] = DEFAULT_TEST_RGB,
+    ) -> None:
+        frame = [0] * self._total_leds * DMX_CHANNELS_PER_LED
+        for led_index in led_indices:
+            if led_index < 0 or led_index >= self._total_leds:
+                continue
+            start = led_index * DMX_CHANNELS_PER_LED
+            frame[start:start + DMX_CHANNELS_PER_LED] = list(rgb)
+        self.send_frame(frame)
+
+    def show_led(self, led_index: int, rgb: tuple[int, int, int] = DEFAULT_TEST_RGB) -> None:
+        self.show_leds([led_index], rgb)
+
+    def close(self) -> None:
+        self._socket.close()
+
+
+def _artnet_dmx_packet(universe: int, data: bytes) -> bytes:
+    length = len(data)
+    return (
+        ARTNET_HEADER
+        + struct.pack("<H", ARTNET_OPCODE_DMX)
+        + struct.pack(">H", ARTNET_PROTOCOL_VERSION)
+        + bytes([ARTNET_SEQUENCE_DISABLED])
+        + bytes([ARTNET_PHYSICAL_PORT])
+        + struct.pack("<H", universe)
+        + struct.pack(">H", length)
+        + data
+    )
 
 
 class ArtNetRenderer:

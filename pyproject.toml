@@ -16,10 +16,13 @@ dependencies = [
     "aalink>=0.2.1",
     "pyqt6>=6.10.2",
     "librosa>=0.11.0",
+    "opencv-python>=4.13.0.92",
 ]
 
 [project.scripts]
 auto-vj-gui = "modules.gui_app:run_gui"
+auto-vj-mapping = "modules.mapping_lab:run_mapping_lab"
+auto-vj-2d-demo = "main_2d:main"
 
 [dependency-groups]
 dev = [
