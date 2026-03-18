@@ -4,19 +4,17 @@ Algorithm:
   Every ANALYSIS_INTERVAL_SECS, compute a mel-spectrogram fingerprint of the
   last FINGERPRINT_WINDOW_SECS of audio.  The novelty score is the cosine
   distance between the current fingerprint and one COMPARISON_OFFSET steps ago.
-  A novelty spike above NOVELTY_THRESHOLD → a structural change just occurred.
+  A novelty spike above NOVELTY_THRESHOLD → a drop just occurred.
 
-  Each detected change is classified into one of three tiers based on its
-  novelty magnitude relative to the song's own history:
-      minor — fills, subtle variations (bottom 50% of event novelty)
-      major — section transitions, build-ups (50th–80th percentile)
-      drop  — climactic moments (top 20%)
+  The inferred drop period is used to derive major and minor change periods:
+      drop_period   — detected from high-novelty event spacing
+      major_period  = drop_period // MAJOR_PERIOD_DIVISOR  (e.g. 64 → 32)
+      minor_period  = drop_period // MINOR_PERIOD_DIVISOR  (e.g. 64 → 16)
 
-  Each tier maintains its own change event history and runs _infer_period
-  independently, producing separate countdowns:
-      tier.beats_to_change = tier_period - (current_beat - last_tier_beat) % tier_period
+  All three tiers share the last drop beat as grid anchor:
+      tier.beats_to_change = derived_period - (current_beat - last_drop_beat) % derived_period
 
-  StructureEstimate.tiers contains all three TierEstimate objects.
+  StructureEstimate.tiers contains TierEstimate objects for all three tiers.
   Flat fields (beats_to_change, confidence, next_change_beat) are populated
   from the most imminent tier for backwards compatibility.
 """
@@ -25,7 +23,6 @@ from __future__ import annotations
 import threading
 from collections import deque
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Callable
 
 import librosa
@@ -42,39 +39,22 @@ FINGERPRINT_HISTORY_LEN = 16     # steps kept in fingerprint history deque
 COMPARISON_OFFSET       = 10     # compare vs ≈1 s ago (10 × 0.10 s)
 
 NOVELTY_EMA_ALPHA = 0.35         # EMA weight for new novelty values (lower = smoother)
-NOVELTY_THRESHOLD = 0.20         # smoothed novelty threshold → change detected
+NOVELTY_THRESHOLD = 0.20         # smoothed novelty threshold → drop detected
 NOVELTY_DISPLAY_MAX = NOVELTY_THRESHOLD * 2  # novelty value that fills the bar
-MINOR_MIN_SPACING_BEATS = 8    # min beats between minor events (≈2 bars)
-MAJOR_MIN_SPACING_BEATS = 16   # min beats between major events (≈4 bars)
-DROP_MIN_SPACING_BEATS  = 32   # min beats between drops (≈8 bars)
-HIGHER_TIER_SUPPRESS_BEATS = 12  # suppress lower-tier events when higher tier expected within N beats
+DROP_MIN_SPACING_BEATS  = 32     # min beats between drops (≈8 bars)
 PHRASE_CANDIDATES = [8, 16, 32, 64]  # valid EDM phrase lengths in beats
-MAX_CHANGE_HISTORY = 8           # change events per tier used for period inference
+MAX_CHANGE_HISTORY = 8           # drop events used for period inference
 CONFIDENCE_REQUIRED_RATIO = 0.6  # fraction of intervals that must agree
 
-NOVELTY_HISTORY_MAX_EVENTS = 200  # long-term change event history (~256 bars)
-MIN_EVENTS_FOR_ADAPTIVE    = 2    # need this many events before adaptive threshold kicks in
-MAJOR_NOVELTY_PERCENTILE   = 50   # events above 50th percentile = major or drop
-DROP_NOVELTY_PERCENTILE    = 80   # events above 80th percentile = drop
+MAJOR_PERIOD_DIVISOR = 2         # major_period = drop_period // MAJOR_PERIOD_DIVISOR
+MINOR_PERIOD_DIVISOR = 4         # minor_period = drop_period // MINOR_PERIOD_DIVISOR
 
 _BUFFER_SAMPLES = int(SAMPLERATE * FINGERPRINT_WINDOW_SECS)
 
 _TIER_NAMES = ("minor", "major", "drop")
-_TIER_ORDER = {"minor": 0, "major": 1, "drop": 2}
-_TIER_MIN_SPACING = {
-    "minor": MINOR_MIN_SPACING_BEATS,
-    "major": MAJOR_MIN_SPACING_BEATS,
-    "drop":  DROP_MIN_SPACING_BEATS,
-}
 
 
 # ── Data structures ────────────────────────────────────────────────────────────
-
-class ChangeType(str, Enum):
-    MINOR = "minor"
-    MAJOR = "major"
-    DROP  = "drop"
-
 
 @dataclass
 class ChangeEvent:
@@ -84,7 +64,7 @@ class ChangeEvent:
 
 @dataclass
 class TierEstimate:
-    change_period: int | None         # inferred phrase period for this tier
+    change_period: int | None         # inferred (or derived) phrase period for this tier
     beats_to_change: float | None     # countdown to next change in this tier
     beats_since_change: float         # beats since last event in this tier
     confidence: float                 # period inference confidence 0.0–1.0
@@ -101,7 +81,7 @@ class StructureEstimate:
     confidence: float              # 0.0–1.0 (consistency of detected changes)
     next_change_beat: float | None = None  # absolute beat position of next change
     # Tier-aware fields
-    detected_tier: str | None = None        # tier of change just detected this cycle
+    detected_tier: str | None = None        # "drop" when a drop was just detected, else None
     most_imminent_tier: str | None = None   # tier of soonest known upcoming change
     tiers: dict = field(default_factory=dict)  # dict[str, TierEstimate]
 
@@ -160,42 +140,19 @@ def _infer_period(
     return period, confidence
 
 
-def _is_higher_tier_imminent(
-    tier_name: str,
-    tier_periods: dict[str, int | None],
-    tier_last_beats: dict[str, float | None],
-    current_beat: float,
-) -> bool:
-    """True if a tier strictly above tier_name is predicted within HIGHER_TIER_SUPPRESS_BEATS."""
-    for name in _TIER_NAMES:
-        if _TIER_ORDER[name] <= _TIER_ORDER[tier_name]:
-            continue
-        last   = tier_last_beats[name]
-        period = tier_periods[name]
-        if last is None or period is None:
-            continue
-        beats_to_next = period - (current_beat - last) % period
-        if beats_to_next <= HIGHER_TIER_SUPPRESS_BEATS:
-            return True
-    return False
-
-
-def _classify_event(novelty: float, all_events: list[ChangeEvent]) -> ChangeType:
-    """Classify a novelty spike into minor / major / drop based on the song's history.
-
-    Uses two adaptive percentile thresholds computed from all_events.
-    Falls back to fixed multiples of NOVELTY_THRESHOLD when too few events exist.
-    """
-    if len(all_events) < MIN_EVENTS_FOR_ADAPTIVE:
-        if novelty >= NOVELTY_THRESHOLD * 3:   return ChangeType.DROP
-        if novelty >= NOVELTY_THRESHOLD * 1.5: return ChangeType.MAJOR
-        return ChangeType.MINOR
-    scores = [e.novelty for e in all_events]
-    drop_thr  = float(np.percentile(scores, DROP_NOVELTY_PERCENTILE))
-    major_thr = float(np.percentile(scores, MAJOR_NOVELTY_PERCENTILE))
-    if novelty >= drop_thr:  return ChangeType.DROP
-    if novelty >= major_thr: return ChangeType.MAJOR
-    return ChangeType.MINOR
+def _derive_tier_periods(
+    drop_period: int | None,
+) -> dict[str, int | None]:
+    """Derive minor and major periods from the drop period using fixed divisors."""
+    if drop_period is None:
+        return {"drop": None, "major": None, "minor": None}
+    major = drop_period // MAJOR_PERIOD_DIVISOR
+    minor = drop_period // MINOR_PERIOD_DIVISOR
+    return {
+        "drop": drop_period,
+        "major": major if major >= 1 else None,
+        "minor": minor if minor >= 1 else None,
+    }
 
 
 # ── Main class ─────────────────────────────────────────────────────────────────
@@ -203,9 +160,8 @@ def _classify_event(novelty: float, all_events: list[ChangeEvent]) -> ChangeType
 class DropEstimator:
     """
     Consumes raw audio chunks (via feed_audio from MicBeatDetector's fan-out),
-    computes spectral novelty, detects structural changes, classifies them into
-    three tiers (minor / major / drop), infers an independent phrase period per
-    tier, and fires a callback with a StructureEstimate every analysis cycle.
+    computes spectral novelty, detects drops (biggest structural changes),
+    infers a drop period, and derives major/minor periods as halves/quarters.
 
     Lifecycle mirrors MicBeatDetector: start() / stop() / pause() / resume().
     """
@@ -221,13 +177,10 @@ class DropEstimator:
         # Fingerprint history (L2-normalised mel vectors)
         self._fingerprint_history: deque[np.ndarray] = deque(maxlen=FINGERPRINT_HISTORY_LEN)
 
-        # Change event tracking — long-term (all tiers combined, for adaptive threshold)
-        self._change_events: list[ChangeEvent] = []
-
-        # Per-tier tracking
-        self._tier_events: dict[str, list[ChangeEvent]] = {n: [] for n in _TIER_NAMES}
-        self._tier_last_beat: dict[str, float | None]   = {n: None for n in _TIER_NAMES}
-        self._tier_period: dict[str, int | None]         = {n: None for n in _TIER_NAMES}
+        # Drop event tracking
+        self._drop_events: list[ChangeEvent] = []
+        self._drop_last_beat: float | None = None
+        self._drop_period: int | None = None
 
         self._last_novelty: float = 0.0       # raw
         self._smoothed_novelty: float = 0.0   # EMA-smoothed, used for display + threshold
@@ -280,11 +233,9 @@ class DropEstimator:
         with self._buffer_lock:
             self._buffer.clear()
         self._fingerprint_history.clear()
-        self._change_events.clear()
-        for name in _TIER_NAMES:
-            self._tier_events[name].clear()
-            self._tier_last_beat[name] = None
-            self._tier_period[name] = None
+        self._drop_events.clear()
+        self._drop_last_beat = None
+        self._drop_period = None
         self._last_novelty = 0.0
         self._smoothed_novelty = 0.0
 
@@ -340,49 +291,54 @@ class DropEstimator:
 
         current_beat = self._link_clock.beat
 
-        # Detect and classify change events (per-tier cooldowns + predictive suppression)
+        # Detect drops: novelty spike with cooldown
         detected_tier: str | None = None
         if self._smoothed_novelty > NOVELTY_THRESHOLD:
-            tier = _classify_event(self._last_novelty, self._change_events)
-            tier_name = tier.value
-            last_tier_beat = self._tier_last_beat[tier_name]
-            beats_since_tier = (
-                current_beat - last_tier_beat if last_tier_beat is not None else float("inf")
+            beats_since_drop = (
+                current_beat - self._drop_last_beat
+                if self._drop_last_beat is not None
+                else float("inf")
             )
-            if (beats_since_tier > _TIER_MIN_SPACING[tier_name]
-                    and not _is_higher_tier_imminent(
-                        tier_name, self._tier_period, self._tier_last_beat, current_beat
-                    )):
+            if beats_since_drop > DROP_MIN_SPACING_BEATS:
                 event = ChangeEvent(beat=current_beat, novelty=self._last_novelty)
-                self._change_events.append(event)
-                if len(self._change_events) > NOVELTY_HISTORY_MAX_EVENTS:
-                    self._change_events.pop(0)
-                detected_tier = tier_name
-                self._tier_last_beat[tier_name] = current_beat
-                self._tier_events[tier_name].append(event)
-                if len(self._tier_events[tier_name]) > MAX_CHANGE_HISTORY:
-                    self._tier_events[tier_name].pop(0)
+                self._drop_events.append(event)
+                if len(self._drop_events) > MAX_CHANGE_HISTORY:
+                    self._drop_events.pop(0)
+                self._drop_last_beat = current_beat
+                detected_tier = "drop"
 
-                # Infer period independently per tier
-                tier_beats = [e.beat for e in self._tier_events[tier_name]]
-                period, _ = _infer_period(tier_beats)
+                # Re-infer drop period from accumulated events
+                drop_beats = [e.beat for e in self._drop_events]
+                period, _ = _infer_period(drop_beats)
                 if period is not None:
-                    self._tier_period[tier_name] = period
+                    self._drop_period = period
 
-        # Build per-tier estimates
+        # Derive per-tier periods from the inferred drop period
+        tier_periods = _derive_tier_periods(self._drop_period)
+
+        # Drop confidence from period inference
+        drop_beats_list = [e.beat for e in self._drop_events]
+        _, drop_confidence = _infer_period(drop_beats_list)
+
+        # Build per-tier estimates (all anchored to last drop beat)
         tiers: dict[str, TierEstimate] = {}
         for tier_name in _TIER_NAMES:
-            last_beat = self._tier_last_beat[tier_name]
-            period    = self._tier_period[tier_name]
-            tier_beats_list = [e.beat for e in self._tier_events[tier_name]]
-            _, tier_confidence = _infer_period(tier_beats_list)
-            beats_since = (current_beat - last_beat) if last_beat is not None else 0.0
-            btc = float(period - beats_since % period) if (period and last_beat is not None) else None
+            period = tier_periods[tier_name]
+            beats_since = (
+                (current_beat - self._drop_last_beat) % period
+                if (period and self._drop_last_beat is not None)
+                else 0.0
+            )
+            btc = (
+                float(period - beats_since)
+                if (period and self._drop_last_beat is not None)
+                else None
+            )
             tiers[tier_name] = TierEstimate(
                 change_period=period,
                 beats_to_change=btc,
                 beats_since_change=beats_since,
-                confidence=tier_confidence,
+                confidence=drop_confidence,
                 next_change_beat=(current_beat + btc) if btc is not None else None,
             )
 

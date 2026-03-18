@@ -7,19 +7,15 @@ from modules.drop_estimator import (
     SAMPLERATE,
     N_MELS,
     NOVELTY_THRESHOLD,
-    MAJOR_NOVELTY_PERCENTILE,
-    DROP_NOVELTY_PERCENTILE,
-    MINOR_MIN_SPACING_BEATS,
     DROP_MIN_SPACING_BEATS,
-    HIGHER_TIER_SUPPRESS_BEATS,
+    MAJOR_PERIOD_DIVISOR,
+    MINOR_PERIOD_DIVISOR,
     ChangeEvent,
-    ChangeType,
     TierEstimate,
     StructureEstimate,
     _compute_fingerprint,
     _infer_period,
-    _classify_event,
-    _is_higher_tier_imminent,
+    _derive_tier_periods,
 )
 from modules.gui_app import (
     VJWorker,
@@ -126,6 +122,29 @@ def test_infer_period_noisy_still_finds_dominant():
     change_beats = [0.0, 32.0, 64.0, 94.0, 126.0]
     period, confidence = _infer_period(change_beats)
     assert period == 32
+
+
+# ── _derive_tier_periods ───────────────────────────────────────────────────────
+
+def test_derive_tier_periods_from_64():
+    periods = _derive_tier_periods(64)
+    assert periods["drop"] == 64
+    assert periods["major"] == 64 // MAJOR_PERIOD_DIVISOR
+    assert periods["minor"] == 64 // MINOR_PERIOD_DIVISOR
+
+
+def test_derive_tier_periods_from_32():
+    periods = _derive_tier_periods(32)
+    assert periods["drop"] == 32
+    assert periods["major"] == 32 // MAJOR_PERIOD_DIVISOR
+    assert periods["minor"] == 32 // MINOR_PERIOD_DIVISOR
+
+
+def test_derive_tier_periods_none_drop():
+    periods = _derive_tier_periods(None)
+    assert periods["drop"] is None
+    assert periods["major"] is None
+    assert periods["minor"] is None
 
 
 # ── StructureEstimate ──────────────────────────────────────────────────────────
@@ -324,36 +343,12 @@ def test_build_auto_prompt_stable_includes_context():
     assert "wave" in prompt
 
 
-# ── ChangeEvent & _classify_event tests ────────────────────────────────────────
+# ── ChangeEvent tests ──────────────────────────────────────────────────────────
 
 def test_change_event_fields():
     ev = ChangeEvent(beat=64.0, novelty=0.35)
     assert ev.beat == pytest.approx(64.0)
     assert ev.novelty == pytest.approx(0.35)
-
-
-def test_classify_event_fallback_below_min_events():
-    # Only 1 event → fallback thresholds: minor < 1.5×, major < 3×, drop >= 3×
-    events = [ChangeEvent(beat=0.0, novelty=0.20)]
-    assert _classify_event(NOVELTY_THRESHOLD * 1.5 - 0.001, events) == ChangeType.MINOR
-    assert _classify_event(NOVELTY_THRESHOLD * 1.5, events) == ChangeType.MAJOR
-    assert _classify_event(NOVELTY_THRESHOLD * 3, events) == ChangeType.DROP
-
-
-def test_classify_event_adaptive_percentiles():
-    # 10 events with linearly increasing novelty; check all three tiers
-    events = [ChangeEvent(beat=float(i * 16), novelty=0.10 + i * 0.01) for i in range(10)]
-    scores = [e.novelty for e in events]
-    major_thr = float(np.percentile(scores, MAJOR_NOVELTY_PERCENTILE))
-    drop_thr  = float(np.percentile(scores, DROP_NOVELTY_PERCENTILE))
-    assert _classify_event(major_thr - 0.001, events) == ChangeType.MINOR
-    assert _classify_event(major_thr, events) == ChangeType.MAJOR
-    assert _classify_event(drop_thr, events) == ChangeType.DROP
-
-
-def test_classify_event_drop_tier_infers_period():
-    # Drop events at 32-beat spacing → period=32
-    assert _infer_period([0.0, 32.0])[0] == 32
 
 
 def test_tier_estimate_fields():
@@ -372,39 +367,12 @@ def test_structure_estimate_tier_fields_default():
     assert est.most_imminent_tier is None
 
 
-def test_per_tier_cooldown_drop_spacing():
+def test_drop_cooldown_respected():
     """A drop cannot be followed by another drop within DROP_MIN_SPACING_BEATS."""
-    # Simulate: drop fired at beat 0; check that at beat DROP_MIN_SPACING-1 it's still blocked
-    tier_last = {"minor": None, "major": None, "drop": 0.0}
-    tier_period = {"minor": None, "major": None, "drop": None}
-    beat_just_before = DROP_MIN_SPACING_BEATS - 1
-    # Not imminent from above (no higher tier than drop), but cooldown prevents second drop
-    # We test the cooldown logic directly: beats_since < min_spacing
-    beats_since = beat_just_before - 0.0
+    drop_last_beat = 0.0
+    beat_just_before = drop_last_beat + DROP_MIN_SPACING_BEATS - 1
+    beats_since = beat_just_before - drop_last_beat
     assert beats_since <= DROP_MIN_SPACING_BEATS
-
-
-def test_suppression_blocks_minor_near_major():
-    """Minor should be suppressed when a major change is predicted within HIGHER_TIER_SUPPRESS_BEATS."""
-    tier_periods   = {"minor": None, "major": 32, "drop": None}
-    tier_last_beats = {"minor": None, "major": 0.0, "drop": None}
-    # 32 - (21 % 32) = 11 beats to next major → within suppress window (12)
-    assert _is_higher_tier_imminent("minor", tier_periods, tier_last_beats, current_beat=21.0)
-
-
-def test_suppression_allows_minor_far_from_major():
-    """Minor should NOT be suppressed when next major change is far away."""
-    tier_periods    = {"minor": None, "major": 32, "drop": None}
-    tier_last_beats = {"minor": None, "major": 0.0, "drop": None}
-    # 32 - (10 % 32) = 22 beats to next major → outside suppress window
-    assert not _is_higher_tier_imminent("minor", tier_periods, tier_last_beats, current_beat=10.0)
-
-
-def test_suppression_drop_never_suppressed():
-    """Drop tier has nothing above it — never suppressed."""
-    tier_periods    = {"minor": None, "major": 32, "drop": 64}
-    tier_last_beats = {"minor": None, "major": 0.0, "drop": 0.0}
-    assert not _is_higher_tier_imminent("drop", tier_periods, tier_last_beats, current_beat=21.0)
 
 
 def test_structure_estimate_detected_tier_set():
